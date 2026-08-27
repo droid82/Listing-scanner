@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>Amazon Listing Scanner</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:#111827; }
+    body { margin:0; background:#f3f4f6; }
+    .wrap { max-width:800px; margin:auto; padding:18px; }
+    .card { background:white; border-radius:18px; padding:18px; box-shadow:0 5px 22px rgba(0,0,0,.07); margin-bottom:15px; }
+    h1 { font-size:1.45rem; margin:0 0 6px; }
+    .sub { color:#6b7280; font-size:.95rem; margin-bottom:15px; }
+    label { font-weight:700; display:block; margin:12px 0 6px; }
+    textarea,input,select { width:100%; box-sizing:border-box; padding:12px; border:1px solid #d1d5db; border-radius:12px; font-size:16px; background:white; }
+    textarea { min-height:180px; resize:vertical; }
+    button { width:100%; border:0; border-radius:13px; padding:14px; font-size:17px; font-weight:800; margin-top:14px; background:#111827; color:#fff; }
+    button:disabled { opacity:.5; }
+    .pill { display:inline-block; padding:5px 9px; border-radius:999px; font-size:.78rem; font-weight:800; margin-right:5px; background:#e5e7eb; }
+    .matched { background:#fee2e2; color:#991b1b; }
+    .clear { background:#dcfce7; color:#166534; }
+    .blocked,.fetch_failed { background:#fef3c7; color:#92400e; }
+    .result { border-top:1px solid #e5e7eb; padding-top:14px; margin-top:14px; }
+    .asin { font-size:1.05rem; font-weight:900; }
+    .title { margin-top:5px; color:#374151; }
+    .match { margin-top:9px; background:#f9fafb; padding:10px; border-radius:10px; font-size:.9rem; }
+    .match b { display:block; margin-bottom:4px; }
+    .warn { color:#92400e; font-size:.88rem; margin-top:8px; }
+    .small { font-size:.82rem; color:#6b7280; }
+    .toolbar { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    a { color:#2563eb; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Amazon Live Listing Scanner</h1>
+    <div class="sub">Scan public Amazon listing content for organic-related wording.</div>
+
+    <label>ASINs</label>
+    <textarea id="asins" placeholder="One per line, e.g.&#10;B07SLWGXJD&#10;B07SKYM3MX"></textarea>
+
+    <div class="toolbar">
+      <div>
+        <label>Marketplace</label>
+        <select id="marketplace">
+          <option>UK</option><option>DE</option><option>FR</option><option>IT</option>
+          <option>ES</option><option>NL</option><option>IE</option>
+        </select>
+      </div>
+      <div>
+        <label>Search terms</label>
+        <input id="terms" value="organic, bio, eco, LU-BIO-04">
+      </div>
+    </div>
+
+    <button id="scan">Scan live listings</button>
+    <p class="small">Checks public page content only. It cannot access Amazon's private catalogue backend.</p>
+  </div>
+
+  <div class="card" id="output" style="display:none">
+    <div id="summary"></div>
+    <div id="results"></div>
+  </div>
+</div>
+
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+
+const btn = document.getElementById('scan');
+const output = document.getElementById('output');
+const summary = document.getElementById('summary');
+const results = document.getElementById('results');
+
+function esc(s='') {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+btn.onclick = async () => {
+  const asins = document.getElementById('asins').value
+    .split(/[\s,;]+/).map(x=>x.trim()).filter(Boolean);
+  const terms = document.getElementById('terms').value
+    .split(',').map(x=>x.trim()).filter(Boolean);
+  const marketplace = document.getElementById('marketplace').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  output.style.display = 'block';
+  summary.innerHTML = 'Checking Amazon…';
+  results.innerHTML = '';
+
+  try {
+    const r = await fetch('/api/scan', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({asins, marketplace, terms})
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'Scan failed');
+
+    const matched = data.results.filter(x=>x.status==='matched').length;
+    summary.innerHTML = `<b>${matched}</b> of <b>${data.count}</b> listings contained a search term.`;
+
+    results.innerHTML = data.results.map(x => `
+      <div class="result">
+        <div><span class="asin">${esc(x.asin)}</span> <span class="pill ${esc(x.status)}">${esc(x.status.replace('_',' '))}</span></div>
+        ${x.title ? `<div class="title">${esc(x.title)}</div>` : ''}
+        <div class="small"><a href="${esc(x.url)}" target="_blank" rel="noopener">Open Amazon listing</a></div>
+        ${x.matches.map(m=>`
+          <div class="match">
+            <b>${esc(m.term)} — ${esc(m.section)}</b>
+            ${esc(m.snippet)}
+          </div>`).join('')}
+        ${x.warning ? `<div class="warn">${esc(x.warning)}</div>` : ''}
+      </div>
+    `).join('');
+  } catch(e) {
+    summary.innerHTML = `<span class="warn">${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Scan live listings';
+  }
+};
+</script>
+</body>
+</html>
