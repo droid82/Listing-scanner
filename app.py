@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -46,13 +45,16 @@ HEADERS = {
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
 SCRAPERAPI_ENDPOINT = "https://api.scraperapi.com/"
 
+
 class ScanRequest(BaseModel):
     asins: List[str]
     marketplace: str = "UK"
     terms: List[str] = DEFAULT_TERMS
 
+
 def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
+
 
 def extract_sections(soup: BeautifulSoup):
     sections = {}
@@ -71,25 +73,25 @@ def extract_sections(soup: BeautifulSoup):
     if desc:
         sections["Description"] = clean_text(desc.get_text(" ", strip=True))
 
-    # Product details / technical details / regulatory information often appear in tables or divs.
     detail_candidates = soup.select(
         "#detailBullets_feature_div, #productDetails_feature_div, "
         "#productDetails_techSpec_section_1, #productDetails_detailBullets_sections1, "
         "#productOverview_feature_div"
     )
     if detail_candidates:
-        details = " | ".join(clean_text(x.get_text(" ", strip=True)) for x in detail_candidates)
+        details = " | ".join(
+            clean_text(x.get_text(" ", strip=True))
+            for x in detail_candidates
+        )
         if details:
             sections["Product details"] = details
 
-    # A+ modules are public HTML when present.
     aplus = soup.select_one("#aplus, #aplus_feature_div")
     if aplus:
         txt = clean_text(aplus.get_text(" ", strip=True))
         if txt:
             sections["A+ content"] = txt
 
-    # Catch other visible page text, useful for regulatory info not covered above.
     body = soup.body
     if body:
         full = clean_text(body.get_text(" ", strip=True))
@@ -98,55 +100,82 @@ def extract_sections(soup: BeautifulSoup):
 
     return sections
 
+
 def find_matches(sections, terms):
     matches = []
+
     for section, text in sections.items():
-        low = text.lower()
         for term in terms:
-            t = term.lower().strip()
-            if not t:
+            raw = term.strip()
+
+            if not raw:
                 continue
-            start = 0
-            while True:
-                idx = low.find(t, start)
-                if idx == -1:
-                    break
-                left = max(0, idx - 100)
-                right = min(len(text), idx + len(t) + 140)
-                snippet = text[left:right]
-                matches.append({
-                    "term": term,
-                    "section": section,
-                    "snippet": snippet
-                })
-                start = idx + len(t)
-                # avoid floods from the full-page text
-                if section == "Visible page text":
-                    break
-    # De-duplicate substantially identical matches.
-    out, seen = [], set()
-    for m in matches:
-        key = (m["term"].lower(), m["section"], m["snippet"].lower())
+
+            # Whole-word matching for short terms like bio and eco.
+            # Prevents false matches such as "eco" inside "seconds".
+            if re.fullmatch(r"[A-Za-z0-9]+", raw):
+                rx = re.compile(
+                    rf"(?<![A-Za-z0-9]){re.escape(raw)}(?![A-Za-z0-9])",
+                    re.I
+                )
+            else:
+                rx = re.compile(re.escape(raw), re.I)
+
+            match = rx.search(text)
+
+            if not match:
+                continue
+
+            left = max(0, match.start() - 120)
+            right = min(len(text), match.end() + 180)
+
+            matches.append({
+                "term": raw,
+                "section": section,
+                "snippet": text[left:right],
+                "full_text": text,
+            })
+
+    out = []
+    seen = set()
+
+    for match in matches:
+        key = (
+            match["term"].lower(),
+            match["section"],
+            match["full_text"].lower()
+        )
+
         if key not in seen:
             seen.add(key)
-            out.append(m)
+            out.append(match)
+
     return out[:30]
+
 
 @app.post("/api/scan")
 def scan(req: ScanRequest):
+
     mp = req.marketplace.upper()
+
     if mp not in MARKETPLACES:
         raise HTTPException(400, "Unsupported marketplace")
 
     cleaned = []
+
     for raw in req.asins:
         asin = re.sub(r"[^A-Z0-9]", "", raw.upper())
+
         if len(asin) == 10:
             cleaned.append(asin)
+
     cleaned = list(dict.fromkeys(cleaned))[:50]
 
     if not cleaned:
-        raise HTTPException(400, "No valid 10-character ASINs supplied")
+        raise HTTPException(
+            400,
+            "No valid 10-character ASINs supplied"
+        )
 
     results = []
 
@@ -154,7 +183,9 @@ def scan(req: ScanRequest):
     session.headers.update(HEADERS)
 
     for asin in cleaned:
+
         url = MARKETPLACES[mp].format(asin)
+
         item = {
             "asin": asin,
             "url": url,
@@ -164,78 +195,67 @@ def scan(req: ScanRequest):
             "matches": [],
             "warning": None,
         }
+
         try:
+
             if SCRAPERAPI_KEY:
+
                 scraper_params = {
                     "api_key": SCRAPERAPI_KEY,
                     "url": url,
                     "country_code": "uk" if mp == "UK" else mp.lower(),
                     "render": "true",
                 }
+
                 r = session.get(
                     SCRAPERAPI_ENDPOINT,
                     params=scraper_params,
                     timeout=70,
                     allow_redirects=True,
                 )
+
                 item["fetch_method"] = "ScraperAPI"
+
             else:
-                r = session.get(url, timeout=18, allow_redirects=True)
+
+                r = session.get(
+                    url,
+                    timeout=18,
+                    allow_redirects=True
+                )
+
                 item["fetch_method"] = "Direct"
 
             item["http_status"] = r.status_code
 
             if r.status_code != 200:
+
                 item["status"] = "fetch_failed"
-                item["warning"] = f"Amazon returned HTTP {r.status_code}."
+
+                item["warning"] = (
+                    f"Amazon returned HTTP {r.status_code}."
+                )
+
                 results.append(item)
                 continue
 
             html_low = r.text.lower()
-            if "captcha" in html_low or "enter the characters you see below" in html_low:
+
+            if (
+                "captcha" in html_low
+                or "enter the characters you see below" in html_low
+            ):
+
                 item["status"] = "blocked"
+
                 if SCRAPERAPI_KEY:
-                    item["warning"] = "Amazon still returned a CAPTCHA through ScraperAPI. Retry or enable stronger proxy settings."
+
+                    item["warning"] = (
+                        "Amazon still returned a CAPTCHA through "
+                        "ScraperAPI. Retry or enable stronger proxy settings."
+                    )
+
                 else:
-                    item["warning"] = "Amazon served a CAPTCHA/robot check. Add SCRAPERAPI_KEY in Render to use ScraperAPI."
-                results.append(item)
-                continue
 
-            soup = BeautifulSoup(r.text, "html.parser")
-            sections = extract_sections(soup)
-            item["title"] = sections.get("Title", "")
-            item["matches"] = find_matches(sections, req.terms)
-            item["status"] = "matched" if item["matches"] else "clear"
-
-            if not item["title"] and not sections.get("Product details"):
-                item["warning"] = (
-                    "Page loaded but Amazon returned limited HTML. "
-                    "A proxy/API provider may be needed for reliable scanning."
-                )
-            results.append(item)
-        except requests.RequestException as e:
-            item["status"] = "fetch_failed"
-            item["warning"] = str(e)
-            results.append(item)
-
-        time.sleep(0.7)
-
-    return {
-        "marketplace": mp,
-        "terms": req.terms,
-        "count": len(results),
-        "source": "ScraperAPI" if SCRAPERAPI_KEY else "Direct",
-        "results": results,
-    }
-
-@app.get("/")
-def home():
-    return FileResponse("index.html")
-
-@app.get("/manifest.webmanifest")
-def manifest():
-    return FileResponse("manifest.webmanifest", media_type="application/manifest+json")
-
-@app.get("/sw.js")
-def sw():
-    return FileResponse("sw.js", media_type="application/javascript")
+                    item["warning"] = (
+                        "Amazon served a CAPTCHA/robot check.
