@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List
 import requests
+import os
 from bs4 import BeautifulSoup
 import re
 import time
@@ -41,6 +42,9 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Cache-Control": "no-cache",
 }
+
+SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
+SCRAPERAPI_ENDPOINT = "https://api.scraperapi.com/"
 
 class ScanRequest(BaseModel):
     asins: List[str]
@@ -161,7 +165,24 @@ def scan(req: ScanRequest):
             "warning": None,
         }
         try:
-            r = session.get(url, timeout=18, allow_redirects=True)
+            if SCRAPERAPI_KEY:
+                scraper_params = {
+                    "api_key": SCRAPERAPI_KEY,
+                    "url": url,
+                    "country_code": "uk" if mp == "UK" else mp.lower(),
+                    "render": "true",
+                }
+                r = session.get(
+                    SCRAPERAPI_ENDPOINT,
+                    params=scraper_params,
+                    timeout=70,
+                    allow_redirects=True,
+                )
+                item["fetch_method"] = "ScraperAPI"
+            else:
+                r = session.get(url, timeout=18, allow_redirects=True)
+                item["fetch_method"] = "Direct"
+
             item["http_status"] = r.status_code
 
             if r.status_code != 200:
@@ -173,7 +194,10 @@ def scan(req: ScanRequest):
             html_low = r.text.lower()
             if "captcha" in html_low or "enter the characters you see below" in html_low:
                 item["status"] = "blocked"
-                item["warning"] = "Amazon served a CAPTCHA/robot check. Retry later or use a proxy/API provider."
+                if SCRAPERAPI_KEY:
+                    item["warning"] = "Amazon still returned a CAPTCHA through ScraperAPI. Retry or enable stronger proxy settings."
+                else:
+                    item["warning"] = "Amazon served a CAPTCHA/robot check. Add SCRAPERAPI_KEY in Render to use ScraperAPI."
                 results.append(item)
                 continue
 
@@ -200,6 +224,7 @@ def scan(req: ScanRequest):
         "marketplace": mp,
         "terms": req.terms,
         "count": len(results),
+        "source": "ScraperAPI" if SCRAPERAPI_KEY else "Direct",
         "results": results,
     }
 
