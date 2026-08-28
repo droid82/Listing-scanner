@@ -5,6 +5,7 @@ from typing import List
 import os
 import re
 import time
+import html as html_lib
 import requests
 from bs4 import BeautifulSoup
 
@@ -33,22 +34,26 @@ class ScanRequest(BaseModel):
 
 
 def normalize(text):
-    text = text or ""
-
-    for dash in ["–", "—", "−", "‐", "-"]:
-        text = text.replace(dash, "-")
-
+    text = html_lib.unescape(text or "")
+    text = text.replace("–", "-")
+    text = text.replace("—", "-")
+    text = text.replace("−", "-")
+    text = text.replace("‐", "-")
+    text = text.replace("-", "-")
     return re.sub(r"\s+", " ", text).strip()
 
 
 def add_section(sections, name, text):
     text = normalize(text)
 
-    if text and text not in sections.values():
+    if not text:
+        return
+
+    if text not in sections.values():
         sections[name] = text
 
 
-def extract_sections(soup):
+def extract_main_sections(soup):
     sections = {}
 
     title = soup.select_one("#productTitle")
@@ -57,7 +62,7 @@ def extract_sections(soup):
         add_section(
             sections,
             "Title",
-            title.get_text(" ", strip=True)
+            title.get_text(" ", strip=True),
         )
 
     bullets = soup.select(
@@ -65,13 +70,16 @@ def extract_sections(soup):
     )
 
     if bullets:
+        bullet_text = " | ".join(
+            x.get_text(" ", strip=True)
+            for x in bullets
+            if x.get_text(" ", strip=True)
+        )
+
         add_section(
             sections,
             "Bullet points",
-            " | ".join(
-                x.get_text(" ", strip=True)
-                for x in bullets
-            )
+            bullet_text,
         )
 
     overview = soup.select_one(
@@ -82,7 +90,7 @@ def extract_sections(soup):
         add_section(
             sections,
             "Product overview",
-            overview.get_text(" ", strip=True)
+            overview.get_text(" ", strip=True),
         )
 
     description = soup.select_one(
@@ -93,7 +101,7 @@ def extract_sections(soup):
         add_section(
             sections,
             "Description",
-            description.get_text(" ", strip=True)
+            description.get_text(" ", strip=True),
         )
 
     detail_selectors = [
@@ -104,149 +112,201 @@ def extract_sections(soup):
         "#prodDetails",
     ]
 
-    for number, selector in enumerate(
-        detail_selectors,
-        start=1
-    ):
+    detail_number = 1
+
+    for selector in detail_selectors:
         node = soup.select_one(selector)
 
         if node:
             add_section(
                 sections,
-                "Product details " + str(number),
-                node.get_text(" ", strip=True)
+                "Product details " + str(detail_number),
+                node.get_text(" ", strip=True),
             )
 
-    aplus = (
-        soup.select_one("#aplus_feature_div")
-        or soup.select_one("#aplus")
-    )
-
-    if aplus:
-        modules = aplus.select(
-            ".aplus-module, .premium-aplus-module"
-        )
-
-        if modules:
-            seen = set()
-            module_number = 1
-
-            for module in modules:
-                text = normalize(
-                    module.get_text(
-                        " ",
-                        strip=True
-                    )
-                )
-
-                if len(text) < 20:
-                    continue
-
-                if text in seen:
-                    continue
-
-                seen.add(text)
-
-                add_section(
-                    sections,
-                    "A+ module " + str(module_number),
-                    text
-                )
-
-                module_number += 1
-
-        add_section(
-            sections,
-            "A+ full content",
-            aplus.get_text(" ", strip=True)
-        )
-
-    extract_regulatory(
-        soup,
-        sections
-    )
+            detail_number += 1
 
     return sections
 
 
-def extract_regulatory(soup, sections):
-    code_pattern = re.compile(
-        r"LU[\s\-–—−‐-]*BIO[\s\-–—−‐-]*04",
-        re.I
+def extract_aplus_sections(soup, sections):
+    aplus = soup.select_one(
+        "#aplus_feature_div"
     )
 
-    text_nodes = soup.find_all(
-        string=True
+    if not aplus:
+        aplus = soup.select_one("#aplus")
+
+    if not aplus:
+        return
+
+    modules = aplus.select(
+        ".aplus-module"
     )
 
-    found = []
-    seen = set()
-
-    for text_node in text_nodes:
-        text = normalize(
-            str(text_node)
+    if not modules:
+        modules = aplus.select(
+            ".premium-aplus-module"
         )
 
-        lower = text.lower()
+    seen = set()
+    module_number = 1
 
-        if (
-            "organic inspection body code"
-            not in lower
-            and
-            "regulatory information"
-            not in lower
-            and
-            not code_pattern.search(text)
-        ):
+    for module in modules:
+        text = normalize(
+            module.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        if len(text) < 20:
             continue
 
+        if text in seen:
+            continue
+
+        seen.add(text)
+
+        add_section(
+            sections,
+            "A+ module " + str(module_number),
+            text,
+        )
+
+        module_number += 1
+
+    add_section(
+        sections,
+        "A+ full content",
+        aplus.get_text(
+            " ",
+            strip=True,
+        ),
+    )
+
+
+def extract_regulatory_sections(
+    soup,
+    raw_html,
+    sections,
+):
+    regulatory_phrase = re.compile(
+        r"organic inspection body code|"
+        r"regulatory information|"
+        r"lu[\s-]*bio[\s-]*04",
+        re.I,
+    )
+
+    seen = set()
+    regulatory_number = 1
+
+    for text_node in soup.find_all(
+        string=regulatory_phrase
+    ):
         node = text_node.parent
+        chosen = ""
 
-        best_text = ""
-
-        for _ in range(6):
+        for _ in range(7):
             if node is None:
                 break
 
             candidate = normalize(
                 node.get_text(
                     " ",
-                    strip=True
+                    strip=True,
                 )
             )
 
-            if 20 <= len(candidate) <= 1800:
+            candidate_lower = (
+                candidate.lower()
+            )
 
+            if 20 <= len(candidate) <= 2500:
                 if (
                     "organic inspection body code"
-                    in candidate.lower()
-                    or
-                    code_pattern.search(candidate)
+                    in candidate_lower
+                    or re.search(
+                        r"lu[\s-]*bio[\s-]*04",
+                        candidate_lower,
+                    )
                 ):
-                    best_text = candidate
+                    chosen = candidate
                     break
 
             node = node.parent
 
         if (
-            best_text
-            and best_text not in seen
+            chosen
+            and chosen not in seen
         ):
-            seen.add(best_text)
-            found.append(best_text)
+            seen.add(chosen)
 
-    for number, text in enumerate(
-        found,
-        start=1
-    ):
-        add_section(
-            sections,
-            "Regulatory information " + str(number),
-            text
+            add_section(
+                sections,
+                "Regulatory information "
+                + str(regulatory_number),
+                chosen,
+            )
+
+            regulatory_number += 1
+
+    raw_normalized = normalize(
+        raw_html
+    )
+
+    fallback_patterns = [
+        re.compile(
+            r".{0,500}"
+            r"organic inspection body code"
+            r".{0,900}",
+            re.I | re.S,
+        ),
+        re.compile(
+            r".{0,500}"
+            r"lu[\s-]*bio[\s-]*04"
+            r".{0,900}",
+            re.I | re.S,
+        ),
+    ]
+
+    for pattern in fallback_patterns:
+        match = pattern.search(
+            raw_normalized
         )
 
+        if not match:
+            continue
 
-def term_pattern(term):
+        fragment = match.group(0)
+
+        text = normalize(
+            BeautifulSoup(
+                fragment,
+                "html.parser",
+            ).get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        if (
+            text
+            and text not in seen
+        ):
+            seen.add(text)
+
+            add_section(
+                sections,
+                "Regulatory source data "
+                + str(regulatory_number),
+                text,
+            )
+
+            regulatory_number += 1
+
+
+def make_term_pattern(term):
     term = normalize(term)
 
     if not term:
@@ -254,21 +314,149 @@ def term_pattern(term):
 
     if term.lower() == "lu-bio-04":
         return re.compile(
-            r"LU[\s\-]*BIO[\s\-]*04",
-            re.I
+            r"lu[\s-]*bio[\s-]*04",
+            re.I,
         )
 
     if re.fullmatch(
         r"[A-Za-z0-9]+",
-        term
+        term,
     ):
         return re.compile(
             r"(?<![A-Za-z0-9])"
             + re.escape(term)
             + r"(?![A-Za-z0-9])",
-            re.I
+            re.I,
         )
 
     return re.compile(
         re.escape(term),
-        re
+        re.I,
+    )
+
+
+def find_matches(
+    sections,
+    terms,
+):
+    results = []
+    seen = set()
+
+    for section, text in sections.items():
+        for term in terms:
+            pattern = make_term_pattern(
+                term
+            )
+
+            if pattern is None:
+                continue
+
+            found = list(
+                pattern.finditer(text)
+            )
+
+            if not found:
+                continue
+
+            key = (
+                section,
+                normalize(term).lower(),
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            first = found[0]
+
+            left = max(
+                0,
+                first.start() - 180,
+            )
+
+            right = min(
+                len(text),
+                first.end() + 300,
+            )
+
+            results.append(
+                {
+                    "term": normalize(term),
+                    "section": section,
+                    "snippet": text[left:right],
+                    "full_text": text,
+                    "occurrences": len(found),
+                }
+            )
+
+    return results
+
+
+def fetch_amazon_page(
+    url,
+    marketplace,
+):
+    if not SCRAPERAPI_KEY:
+        return None
+
+    country = (
+        "uk"
+        if marketplace == "UK"
+        else marketplace.lower()
+    )
+
+    return requests.get(
+        SCRAPERAPI_ENDPOINT,
+        params={
+            "api_key": SCRAPERAPI_KEY,
+            "url": url,
+            "country_code": country,
+            "render": "true",
+        },
+        timeout=70,
+    )
+
+
+@app.post("/api/scan")
+def scan(req: ScanRequest):
+    marketplace = (
+        req.marketplace.upper()
+    )
+
+    if marketplace not in MARKETPLACES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported marketplace",
+        )
+
+    asins = []
+
+    for raw in req.asins:
+        asin = re.sub(
+            r"[^A-Z0-9]",
+            "",
+            raw.upper(),
+        )
+
+        if (
+            len(asin) == 10
+            and asin not in asins
+        ):
+            asins.append(asin)
+
+    if not asins:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid ASINs supplied",
+        )
+
+    results = []
+
+    for asin in asins[:50]:
+        url = MARKETPLACES[
+            marketplace
+        ].format(asin)
+
+        item = {
+           
