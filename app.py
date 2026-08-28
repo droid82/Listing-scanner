@@ -18,14 +18,20 @@ MARKETPLACES = {
     "IT": "https://www.amazon.it/dp/{}",
     "ES": "https://www.amazon.es/dp/{}",
     "NL": "https://www.amazon.nl/dp/{}",
-    "IE": "https://www.amazon.ie/dp/{}"
+    "IE": "https://www.amazon.ie/dp/{}",
 }
 
 DEFAULT_TERMS = [
     "organic",
+    "organically",
+    "certified organic",
+    "organic certificate",
+    "organic certification",
+    "organic inspection body",
     "bio",
     "eco",
-    "lu-bio-04"
+    "ecological",
+    "lu-bio-04",
 ]
 
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
@@ -40,75 +46,51 @@ class ScanRequest(BaseModel):
 
 def normalize(text):
     text = html.unescape(text or "")
-
-    # Convert Amazon's various long dashes to normal hyphens
-    text = (
-        text
-        .replace("–", "-")
-        .replace("—", "-")
-        .replace("−", "-")
-        .replace("‐", "-")
-        .replace("-", "-")
-    )
-
+    text = text.replace("–", "-")
+    text = text.replace("—", "-")
+    text = text.replace("−", "-")
+    text = text.replace("‐", "-")
+    text = text.replace("-", "-")
     return re.sub(r"\s+", " ", text).strip()
 
 
 def add_section(sections, name, text):
     text = normalize(text)
-
     if not text:
         return
-
     if text not in sections.values():
         sections[name] = text
 
 
-def extract_normal_sections(soup):
+def extract_sections(soup):
     sections = {}
 
     title = soup.select_one("#productTitle")
     if title:
-        add_section(
-            sections,
-            "Title",
-            title.get_text(" ", strip=True)
-        )
+        add_section(sections, "Title", title.get_text(" ", strip=True))
 
-    bullets = soup.select(
-        "#feature-bullets li span.a-list-item"
-    )
-
+    bullets = soup.select("#feature-bullets li span.a-list-item")
     if bullets:
         add_section(
             sections,
             "Bullet points",
-            " | ".join(
-                x.get_text(" ", strip=True)
-                for x in bullets
-            )
+            " | ".join(x.get_text(" ", strip=True) for x in bullets),
         )
 
-    overview = soup.select_one(
-        "#productOverview_feature_div"
-    )
-
+    overview = soup.select_one("#productOverview_feature_div")
     if overview:
         add_section(
             sections,
             "Product overview",
-            overview.get_text(" ", strip=True)
+            overview.get_text(" ", strip=True),
         )
 
-    description = soup.select_one(
-        "#productDescription"
-    )
-
+    description = soup.select_one("#productDescription")
     if description:
         add_section(
             sections,
             "Description",
-            description.get_text(" ", strip=True)
+            description.get_text(" ", strip=True),
         )
 
     detail_selectors = [
@@ -116,169 +98,129 @@ def extract_normal_sections(soup):
         "#productDetails_feature_div",
         "#productDetails_techSpec_section_1",
         "#productDetails_detailBullets_sections1",
-        "#prodDetails"
+        "#prodDetails",
     ]
 
-    for number, selector in enumerate(
-        detail_selectors,
-        start=1
-    ):
+    detail_number = 1
+    for selector in detail_selectors:
         node = soup.select_one(selector)
-
         if node:
             add_section(
                 sections,
-                "Product details " + str(number),
-                node.get_text(" ", strip=True)
+                "Product details " + str(detail_number),
+                node.get_text(" ", strip=True),
             )
+            detail_number += 1
+
+    aplus = soup.select_one("#aplus_feature_div")
+    if not aplus:
+        aplus = soup.select_one("#aplus")
+
+    if aplus:
+        modules = aplus.select(".aplus-module")
+
+        if not modules:
+            modules = aplus.select(".premium-aplus-module")
+
+        seen_modules = set()
+        module_number = 1
+
+        for module in modules:
+            text = normalize(module.get_text(" ", strip=True))
+
+            if len(text) < 20 or text in seen_modules:
+                continue
+
+            seen_modules.add(text)
+
+            add_section(
+                sections,
+                "A+ module " + str(module_number),
+                text,
+            )
+
+            module_number += 1
+
+        add_section(
+            sections,
+            "A+ full content",
+            aplus.get_text(" ", strip=True),
+        )
 
     return sections
 
 
-def extract_aplus(soup, sections):
-    aplus = soup.select_one(
-        "#aplus_feature_div"
-    )
-
-    if not aplus:
-        aplus = soup.select_one("#aplus")
-
-    if not aplus:
-        return
-
-    modules = aplus.select(".aplus-module")
-
-    if not modules:
-        modules = aplus.select(
-            ".premium-aplus-module"
-        )
-
-    number = 1
-    seen = set()
-
-    for module in modules:
-        text = normalize(
-            module.get_text(" ", strip=True)
-        )
-
-        if len(text) < 20:
-            continue
-
-        if text in seen:
-            continue
-
-        seen.add(text)
-
-        sections[
-            "A+ module " + str(number)
-        ] = text
-
-        number += 1
-
-    add_section(
-        sections,
-        "A+ full content",
-        aplus.get_text(" ", strip=True)
-    )
-
-
 def extract_regulatory(soup, raw_html, sections):
-    regulatory_patterns = [
-        r"organic inspection body code",
-        r"regulatory information",
-        r"LU[\s\-–—−‐-]*BIO[\s\-–—−‐-]*04"
-    ]
-
-    combined = re.compile(
-        "|".join(regulatory_patterns),
-        re.I
+    phrases = re.compile(
+        r"organic inspection body code|regulatory information|"
+        r"LU[\s\-–—−‐-]*BIO[\s\-–—−‐-]*04",
+        re.I,
     )
 
-    # First search actual rendered DOM text
-    matches = soup.find_all(
-        string=combined
-    )
+    matches = soup.find_all(string=phrases)
 
-    regulatory_number = 1
     seen = set()
+    number = 1
 
     for match in matches:
         node = match.parent
 
-        # Walk upward until we get enough useful context
-        for _ in range(6):
+        for _ in range(7):
             if node is None:
                 break
 
-            text = normalize(
-                node.get_text(" ", strip=True)
-            )
+            text = normalize(node.get_text(" ", strip=True))
 
-            if 25 <= len(text) <= 2500:
-                if (
-                    "organic inspection body code"
-                    in text.lower()
-                    or
-                    "regulatory information"
-                    in text.lower()
-                    or
-                    re.search(
-                        r"LU[\s\-]*BIO[\s\-]*04",
-                        text,
-                        re.I
-                    )
-                ):
-                    if text not in seen:
-                        seen.add(text)
+            if 20 <= len(text) <= 3000 and phrases.search(text):
+                if text not in seen:
+                    seen.add(text)
+                    sections[
+                        "Regulatory information " + str(number)
+                    ] = text
+                    number += 1
 
-                        sections[
-                            "Regulatory information "
-                            + str(regulatory_number)
-                        ] = text
-
-                        regulatory_number += 1
-
-                    break
+                break
 
             node = node.parent
 
-    # Fallback:
-    # Amazon sometimes embeds the regulatory block inside
-    # script/JSON rather than ordinary visible DOM.
-    normalized_raw = normalize(raw_html)
+    raw = raw_html.replace("–", "-")
+    raw = raw.replace("—", "-")
+    raw = raw.replace("−", "-")
+    raw = raw.replace("‐", "-")
+    raw = raw.replace("-", "-")
 
-    regulatory_regex = re.compile(
-        r".{0,500}"
-        r"(?:"
-        r"organic inspection body code"
-        r"|LU[\s\-]*BIO[\s\-]*04"
-        r")"
-        r".{0,800}",
-        re.I
-    )
+    raw_patterns = [
+        re.compile(
+            r".{0,350}organic inspection body code.{0,650}",
+            re.I | re.S,
+        ),
+        re.compile(
+            r".{0,350}LU[\s\-]*BIO[\s\-]*04.{0,650}",
+            re.I | re.S,
+        ),
+    ]
 
-    for match in regulatory_regex.finditer(
-        normalized_raw
-    ):
-        text = normalize(match.group(0))
+    for pattern in raw_patterns:
+        for match in pattern.finditer(raw):
+            fragment = match.group(0)
 
-        # Strip obvious HTML tags if raw markup remains
-        text = normalize(
-            BeautifulSoup(
-                text,
-                "html.parser"
-            ).get_text(" ", strip=True)
-        )
+            text = normalize(
+                BeautifulSoup(
+                    fragment,
+                    "html.parser",
+                ).get_text(" ", strip=True)
+            )
 
-        if text and text not in seen:
+            if not text or text in seen:
+                continue
+
             seen.add(text)
 
             sections[
-                "Regulatory raw data "
-                + str(regulatory_number)
+                "Regulatory raw data " + str(number)
             ] = text
 
-            regulatory_number += 1
+            number += 1
 
 
 def term_pattern(term):
@@ -290,23 +232,20 @@ def term_pattern(term):
     if term.lower() == "lu-bio-04":
         return re.compile(
             r"LU[\s\-]*BIO[\s\-]*04",
-            re.I
+            re.I,
         )
 
-    if re.fullmatch(
-        r"[A-Za-z0-9]+",
-        term
-    ):
+    if re.fullmatch(r"[A-Za-z0-9]+", term):
         return re.compile(
             r"(?<![A-Za-z0-9])"
             + re.escape(term)
             + r"(?![A-Za-z0-9])",
-            re.I
+            re.I,
         )
 
     return re.compile(
         re.escape(term),
-        re.I
+        re.I,
     )
 
 
@@ -321,28 +260,14 @@ def find_matches(sections, terms):
             if pattern is None:
                 continue
 
-            matches = list(
-                pattern.finditer(text)
-            )
+            found = list(pattern.finditer(text))
 
-            if not matches:
+            if not found:
                 continue
-
-            first = matches[0]
-
-            left = max(
-                0,
-                first.start() - 180
-            )
-
-            right = min(
-                len(text),
-                first.end() + 300
-            )
 
             key = (
                 section,
-                normalize(term).lower()
+                normalize(term).lower(),
             )
 
             if key in seen:
@@ -350,18 +275,30 @@ def find_matches(sections, terms):
 
             seen.add(key)
 
+            first = found[0]
+
+            left = max(
+                0,
+                first.start() - 180,
+            )
+
+            right = min(
+                len(text),
+                first.end() + 300,
+            )
+
             results.append({
                 "term": normalize(term),
                 "section": section,
                 "snippet": text[left:right],
                 "full_text": text,
-                "occurrences": len(matches)
+                "occurrences": len(found),
             })
 
     return results
 
 
-def fetch_page(url, marketplace):
+def scraper_request(url, marketplace, render):
     if not SCRAPERAPI_KEY:
         return None
 
@@ -371,16 +308,41 @@ def fetch_page(url, marketplace):
         else marketplace.lower()
     )
 
+    params = {
+        "api_key": SCRAPERAPI_KEY,
+        "url": url,
+        "country_code": country,
+        "device_type": "mobile",
+        "premium": "true",
+    }
+
+    if render:
+        params["render"] = "true"
+
+    timeout = 38 if render else 22
+
     return requests.get(
         SCRAPERAPI_ENDPOINT,
-        params={
-            "api_key": SCRAPERAPI_KEY,
-            "url": url,
-            "country_code": country,
-            "render": "true"
-        },
-        timeout=70
+        params=params,
+        timeout=timeout,
     )
+
+
+def parse_response(response):
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser",
+    )
+
+    sections = extract_sections(soup)
+
+    extract_regulatory(
+        soup,
+        response.text,
+        sections,
+    )
+
+    return soup, sections
 
 
 @app.post("/api/scan")
@@ -390,7 +352,7 @@ def scan(req: ScanRequest):
     if marketplace not in MARKETPLACES:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported marketplace"
+            detail="Unsupported marketplace",
         )
 
     asins = []
@@ -399,7 +361,7 @@ def scan(req: ScanRequest):
         asin = re.sub(
             r"[^A-Z0-9]",
             "",
-            raw.upper()
+            raw.upper(),
         )
 
         if (
@@ -411,12 +373,17 @@ def scan(req: ScanRequest):
     if not asins:
         raise HTTPException(
             status_code=400,
-            detail="No valid ASINs supplied"
+            detail="No valid ASINs supplied",
         )
 
     results = []
 
     for asin in asins[:50]:
+        print(
+            "SCAN START " + asin,
+            flush=True,
+        )
+
         url = MARKETPLACES[
             marketplace
         ].format(asin)
@@ -427,13 +394,20 @@ def scan(req: ScanRequest):
             "status": "unknown",
             "title": "",
             "matches": [],
-            "warning": None
+            "warning": None,
+            "fetch_stage": None,
         }
 
         try:
-            response = fetch_page(
+            print(
+                "STATIC FETCH " + asin,
+                flush=True,
+            )
+
+            response = scraper_request(
                 url,
-                marketplace
+                marketplace,
+                render=False,
             )
 
             if response is None:
@@ -445,8 +419,17 @@ def scan(req: ScanRequest):
                 results.append(item)
                 continue
 
+            print(
+                "STATIC STATUS "
+                + asin
+                + " "
+                + str(response.status_code),
+                flush=True,
+            )
+
             if response.status_code != 200:
                 item["status"] = "fetch_failed"
+
                 item["warning"] = (
                     "ScraperAPI returned HTTP "
                     + str(response.status_code)
@@ -455,82 +438,174 @@ def scan(req: ScanRequest):
                 results.append(item)
                 continue
 
-            lower = response.text.lower()
-
-            if (
-                "enter the characters you see below"
-                in lower
-            ):
-                item["status"] = "blocked"
-                item["warning"] = (
-                    "Amazon returned a CAPTCHA."
-                )
-
-                results.append(item)
-                continue
-
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser"
+            soup, sections = parse_response(
+                response
             )
 
-            sections = extract_normal_sections(
-                soup
-            )
-
-            extract_aplus(
-                soup,
-                sections
-            )
-
-            extract_regulatory(
-                soup,
-                response.text,
-                sections
-            )
+            item["fetch_stage"] = "static"
 
             item["title"] = sections.get(
                 "Title",
-                ""
+                "",
             )
 
-            item["matches"] = find_matches(
+            matches = find_matches(
                 sections,
-                req.terms
+                req.terms,
             )
+
+            regulatory_found = any(
+                name.startswith("Regulatory")
+                for name in sections
+            )
+
+            aplus_found = any(
+                name.startswith("A+")
+                for name in sections
+            )
+
+            if matches:
+                item["matches"] = matches
+                item["status"] = "matched"
+                item["sections_found"] = list(
+                    sections.keys()
+                )
+
+                results.append(item)
+
+                print(
+                    "STATIC MATCH " + asin,
+                    flush=True,
+                )
+
+                continue
+
+            needs_render = (
+                not regulatory_found
+                or not aplus_found
+            )
+
+            if needs_render:
+                print(
+                    "RENDER FETCH " + asin,
+                    flush=True,
+                )
+
+                try:
+                    rendered = scraper_request(
+                        url,
+                        marketplace,
+                        render=True,
+                    )
+
+                except requests.Timeout:
+                    rendered = None
+
+                if rendered is not None:
+                    print(
+                        "RENDER STATUS "
+                        + asin
+                        + " "
+                        + str(rendered.status_code),
+                        flush=True,
+                    )
+
+                if (
+                    rendered is not None
+                    and rendered.status_code == 200
+                ):
+                    soup, rendered_sections = (
+                        parse_response(rendered)
+                    )
+
+                    for name, text in (
+                        rendered_sections.items()
+                    ):
+                        if name not in sections:
+                            sections[name] = text
+
+                    item["fetch_stage"] = "rendered"
+
+                    item["title"] = sections.get(
+                        "Title",
+                        item["title"],
+                    )
+
+                    matches = find_matches(
+                        sections,
+                        req.terms,
+                    )
+
+            item["matches"] = matches
 
             item["sections_found"] = list(
                 sections.keys()
             )
 
-            if item["matches"]:
+            if matches:
                 item["status"] = "matched"
 
-            elif len(sections) <= 1:
-                # Don't falsely call it clear when
-                # ScraperAPI only returned the title.
-                item["status"] = "incomplete"
-                item["warning"] = (
-                    "Only limited Amazon listing data "
-                    "was retrieved. Result is not verified clear."
-                )
-
-            else:
+            elif any(
+                name.startswith("Regulatory")
+                for name in sections
+            ):
                 item["status"] = "clear"
 
+            else:
+                item["status"] = "incomplete"
+
+                item["warning"] = (
+                    "Amazon product data was retrieved, "
+                    "but the regulatory section was not "
+                    "verified. This ASIN is not confirmed clear."
+                )
+
             results.append(item)
+
+            print(
+                "SCAN END "
+                + asin
+                + " "
+                + item["status"],
+                flush=True,
+            )
+
+        except requests.Timeout:
+            item["status"] = "incomplete"
+
+            item["warning"] = (
+                "ScraperAPI timed out before the "
+                "regulatory data could be verified. "
+                "This ASIN is not confirmed clear."
+            )
+
+            results.append(item)
+
+            print(
+                "SCAN TIMEOUT " + asin,
+                flush=True,
+            )
 
         except requests.RequestException as error:
             item["status"] = "fetch_failed"
             item["warning"] = str(error)
+
             results.append(item)
 
-        time.sleep(0.5)
+            print(
+                "SCAN ERROR "
+                + asin
+                + " "
+                + str(error),
+                flush=True,
+            )
+
+        time.sleep(0.3)
 
     return {
         "marketplace": marketplace,
         "count": len(results),
-        "results": results
+        "results": results,
     }
 
 
@@ -543,7 +618,7 @@ def home():
 def manifest():
     return FileResponse(
         "manifest.webmanifest",
-        media_type="application/manifest+json"
+        media_type="application/manifest+json",
     )
 
 
@@ -551,5 +626,5 @@ def manifest():
 def service_worker():
     return FileResponse(
         "sw.js",
-        media_type="application/javascript"
+        media_type="application/javascript",
     )
