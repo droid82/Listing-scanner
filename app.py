@@ -5,6 +5,7 @@ from typing import List
 import os
 import re
 import time
+import html
 import requests
 from bs4 import BeautifulSoup
 
@@ -20,7 +21,12 @@ MARKETPLACES = {
     "IE": "https://www.amazon.ie/dp/{}"
 }
 
-DEFAULT_TERMS = ["organic", "bio", "eco", "lu-bio-04"]
+DEFAULT_TERMS = [
+    "organic",
+    "bio",
+    "eco",
+    "lu-bio-04"
+]
 
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
 SCRAPERAPI_ENDPOINT = "https://api.scraperapi.com/"
@@ -32,12 +38,24 @@ class ScanRequest(BaseModel):
     terms: List[str] = DEFAULT_TERMS
 
 
-def clean(text):
-    return re.sub(r"\s+", " ", text or "").strip()
+def normalize(text):
+    text = html.unescape(text or "")
+
+    # Convert Amazon's various long dashes to normal hyphens
+    text = (
+        text
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace("‐", "-")
+        .replace("-", "-")
+    )
+
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def add_section(sections, name, text):
-    text = clean(text)
+    text = normalize(text)
 
     if not text:
         return
@@ -46,11 +64,10 @@ def add_section(sections, name, text):
         sections[name] = text
 
 
-def extract_sections(soup):
+def extract_normal_sections(soup):
     sections = {}
 
     title = soup.select_one("#productTitle")
-
     if title:
         add_section(
             sections,
@@ -63,16 +80,13 @@ def extract_sections(soup):
     )
 
     if bullets:
-        bullet_text = " | ".join(
-            clean(x.get_text(" ", strip=True))
-            for x in bullets
-            if clean(x.get_text(" ", strip=True))
-        )
-
         add_section(
             sections,
             "Bullet points",
-            bullet_text
+            " | ".join(
+                x.get_text(" ", strip=True)
+                for x in bullets
+            )
         )
 
     overview = soup.select_one(
@@ -105,7 +119,7 @@ def extract_sections(soup):
         "#prodDetails"
     ]
 
-    for index, selector in enumerate(
+    for number, selector in enumerate(
         detail_selectors,
         start=1
     ):
@@ -114,103 +128,170 @@ def extract_sections(soup):
         if node:
             add_section(
                 sections,
-                "Product details " + str(index),
+                "Product details " + str(number),
                 node.get_text(" ", strip=True)
             )
-
-    important_selectors = [
-        "#important-information",
-        "#importantInformation",
-        "#safety-information",
-        "#ingredients",
-        "#directions",
-        "#legal-disclaimer"
-    ]
-
-    for index, selector in enumerate(
-        important_selectors,
-        start=1
-    ):
-        node = soup.select_one(selector)
-
-        if node:
-            add_section(
-                sections,
-                "Important information " + str(index),
-                node.get_text(" ", strip=True)
-            )
-
-    aplus_root = soup.select_one(
-        "#aplus_feature_div"
-    )
-
-    if not aplus_root:
-        aplus_root = soup.select_one(
-            "#aplus"
-        )
-
-    if aplus_root:
-        modules = aplus_root.select(
-            ".aplus-module"
-        )
-
-        if not modules:
-            modules = aplus_root.select(
-                ".premium-aplus-module"
-            )
-
-        if not modules:
-            modules = aplus_root.select(
-                "[data-csa-c-content-id]"
-            )
-
-        module_number = 1
-        seen_module_text = set()
-
-        for module in modules:
-            text = clean(
-                module.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            if not text:
-                continue
-
-            if len(text) < 20:
-                continue
-
-            if text in seen_module_text:
-                continue
-
-            seen_module_text.add(text)
-
-            add_section(
-                sections,
-                "A+ module " + str(module_number),
-                text
-            )
-
-            module_number += 1
-
-        add_section(
-            sections,
-            "A+ full content",
-            aplus_root.get_text(
-                " ",
-                strip=True
-            )
-        )
 
     return sections
 
 
+def extract_aplus(soup, sections):
+    aplus = soup.select_one(
+        "#aplus_feature_div"
+    )
+
+    if not aplus:
+        aplus = soup.select_one("#aplus")
+
+    if not aplus:
+        return
+
+    modules = aplus.select(".aplus-module")
+
+    if not modules:
+        modules = aplus.select(
+            ".premium-aplus-module"
+        )
+
+    number = 1
+    seen = set()
+
+    for module in modules:
+        text = normalize(
+            module.get_text(" ", strip=True)
+        )
+
+        if len(text) < 20:
+            continue
+
+        if text in seen:
+            continue
+
+        seen.add(text)
+
+        sections[
+            "A+ module " + str(number)
+        ] = text
+
+        number += 1
+
+    add_section(
+        sections,
+        "A+ full content",
+        aplus.get_text(" ", strip=True)
+    )
+
+
+def extract_regulatory(soup, raw_html, sections):
+    regulatory_patterns = [
+        r"organic inspection body code",
+        r"regulatory information",
+        r"LU[\s\-–—−‐-]*BIO[\s\-–—−‐-]*04"
+    ]
+
+    combined = re.compile(
+        "|".join(regulatory_patterns),
+        re.I
+    )
+
+    # First search actual rendered DOM text
+    matches = soup.find_all(
+        string=combined
+    )
+
+    regulatory_number = 1
+    seen = set()
+
+    for match in matches:
+        node = match.parent
+
+        # Walk upward until we get enough useful context
+        for _ in range(6):
+            if node is None:
+                break
+
+            text = normalize(
+                node.get_text(" ", strip=True)
+            )
+
+            if 25 <= len(text) <= 2500:
+                if (
+                    "organic inspection body code"
+                    in text.lower()
+                    or
+                    "regulatory information"
+                    in text.lower()
+                    or
+                    re.search(
+                        r"LU[\s\-]*BIO[\s\-]*04",
+                        text,
+                        re.I
+                    )
+                ):
+                    if text not in seen:
+                        seen.add(text)
+
+                        sections[
+                            "Regulatory information "
+                            + str(regulatory_number)
+                        ] = text
+
+                        regulatory_number += 1
+
+                    break
+
+            node = node.parent
+
+    # Fallback:
+    # Amazon sometimes embeds the regulatory block inside
+    # script/JSON rather than ordinary visible DOM.
+    normalized_raw = normalize(raw_html)
+
+    regulatory_regex = re.compile(
+        r".{0,500}"
+        r"(?:"
+        r"organic inspection body code"
+        r"|LU[\s\-]*BIO[\s\-]*04"
+        r")"
+        r".{0,800}",
+        re.I
+    )
+
+    for match in regulatory_regex.finditer(
+        normalized_raw
+    ):
+        text = normalize(match.group(0))
+
+        # Strip obvious HTML tags if raw markup remains
+        text = normalize(
+            BeautifulSoup(
+                text,
+                "html.parser"
+            ).get_text(" ", strip=True)
+        )
+
+        if text and text not in seen:
+            seen.add(text)
+
+            sections[
+                "Regulatory raw data "
+                + str(regulatory_number)
+            ] = text
+
+            regulatory_number += 1
+
+
 def term_pattern(term):
-    term = term.strip()
+    term = normalize(term)
 
     if not term:
         return None
+
+    if term.lower() == "lu-bio-04":
+        return re.compile(
+            r"LU[\s\-]*BIO[\s\-]*04",
+            re.I
+        )
 
     if re.fullmatch(
         r"[A-Za-z0-9]+",
@@ -247,21 +328,21 @@ def find_matches(sections, terms):
             if not matches:
                 continue
 
-            first_match = matches[0]
+            first = matches[0]
 
             left = max(
                 0,
-                first_match.start() - 160
+                first.start() - 180
             )
 
             right = min(
                 len(text),
-                first_match.end() + 240
+                first.end() + 300
             )
 
             key = (
                 section,
-                term.lower()
+                normalize(term).lower()
             )
 
             if key in seen:
@@ -270,7 +351,7 @@ def find_matches(sections, terms):
             seen.add(key)
 
             results.append({
-                "term": term.strip(),
+                "term": normalize(term),
                 "section": section,
                 "snippet": text[left:right],
                 "full_text": text,
@@ -282,7 +363,7 @@ def find_matches(sections, terms):
 
 def fetch_page(url, marketplace):
     if not SCRAPERAPI_KEY:
-        return None, "missing_key"
+        return None
 
     country = (
         "uk"
@@ -290,7 +371,7 @@ def fetch_page(url, marketplace):
         else marketplace.lower()
     )
 
-    response = requests.get(
+    return requests.get(
         SCRAPERAPI_ENDPOINT,
         params={
             "api_key": SCRAPERAPI_KEY,
@@ -300,8 +381,6 @@ def fetch_page(url, marketplace):
         },
         timeout=70
     )
-
-    return response, "ScraperAPI"
 
 
 @app.post("/api/scan")
@@ -352,17 +431,15 @@ def scan(req: ScanRequest):
         }
 
         try:
-            response, method = fetch_page(
+            response = fetch_page(
                 url,
                 marketplace
             )
 
-            item["fetch_method"] = method
-
             if response is None:
                 item["status"] = "fetch_failed"
                 item["warning"] = (
-                    "SCRAPERAPI_KEY is missing in Render."
+                    "SCRAPERAPI_KEY is missing."
                 )
 
                 results.append(item)
@@ -397,8 +474,19 @@ def scan(req: ScanRequest):
                 "html.parser"
             )
 
-            sections = extract_sections(
+            sections = extract_normal_sections(
                 soup
+            )
+
+            extract_aplus(
+                soup,
+                sections
+            )
+
+            extract_regulatory(
+                soup,
+                response.text,
+                sections
             )
 
             item["title"] = sections.get(
@@ -411,27 +499,30 @@ def scan(req: ScanRequest):
                 req.terms
             )
 
-            item["status"] = (
-                "matched"
-                if item["matches"]
-                else "clear"
-            )
-
             item["sections_found"] = list(
                 sections.keys()
             )
 
-            if not sections:
+            if item["matches"]:
+                item["status"] = "matched"
+
+            elif len(sections) <= 1:
+                # Don't falsely call it clear when
+                # ScraperAPI only returned the title.
+                item["status"] = "incomplete"
                 item["warning"] = (
-                    "Amazon returned limited product content."
+                    "Only limited Amazon listing data "
+                    "was retrieved. Result is not verified clear."
                 )
+
+            else:
+                item["status"] = "clear"
 
             results.append(item)
 
         except requests.RequestException as error:
             item["status"] = "fetch_failed"
             item["warning"] = str(error)
-
             results.append(item)
 
         time.sleep(0.5)
@@ -445,9 +536,7 @@ def scan(req: ScanRequest):
 
 @app.get("/")
 def home():
-    return FileResponse(
-        "index.html"
-    )
+    return FileResponse("index.html")
 
 
 @app.get("/manifest.webmanifest")
