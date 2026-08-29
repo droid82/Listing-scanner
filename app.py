@@ -20,6 +20,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("listing-scanner")
 
+BUILD_ID = "2026-08-29-fast-regulatory-v1"
+
 MARKETPLACES = {
     "UK": {"url": "https://www.amazon.co.uk/dp/{}", "country": "uk"},
     "DE": {"url": "https://www.amazon.de/dp/{}", "country": "de"},
@@ -93,8 +95,36 @@ def add_section(sections, name, text):
         sections[name] = text
 
 
-def extract_sections(raw_html):
+def extract_sections(raw_html, log_context=""):
+    """Extract the Amazon sections we care about without scanning the full
+    raw HTML with an expensive DOTALL context regex.
+
+    Amazon pages can be several megabytes.  The old fallback normalised the
+    entire HTML string and then ran a broad ``.{0,500} ... .{0,900}`` regex
+    across it.  On a small Render instance that could take minutes after the
+    ScraperAPI job had already finished.
+
+    This version keeps the normal BeautifulSoup extraction and uses cheap,
+    bounded raw-HTML windows only when looking for regulatory fallbacks.
+    """
+    extract_started = time.monotonic()
+    html_chars = len(raw_html or "")
+
+    logger.info(
+        "EXTRACT_START context=%s html_chars=%s build=%s",
+        log_context or "-",
+        html_chars,
+        BUILD_ID,
+    )
+
+    soup_started = time.monotonic()
     soup = BeautifulSoup(raw_html, "html.parser")
+    logger.info(
+        "EXTRACT_SOUP_READY context=%s elapsed_ms=%s",
+        log_context or "-",
+        int((time.monotonic() - soup_started) * 1000),
+    )
+
     sections = {}
 
     title = soup.select_one("#productTitle")
@@ -181,6 +211,8 @@ def extract_sections(raw_html):
             aplus.get_text(" ", strip=True),
         )
 
+    regulatory_started = time.monotonic()
+
     regulatory_marker = re.compile(
         r"organic inspection body code|"
         r"regulatory information|"
@@ -193,6 +225,8 @@ def extract_sections(raw_html):
     regulatory_seen = set()
     regulatory_number = 1
 
+    # First use parsed text nodes.  This is the most accurate source because
+    # it strips scripts/markup and lets us climb to the containing section.
     for text_node in soup.find_all(string=regulatory_marker):
         node = text_node.parent
         chosen = ""
@@ -231,37 +265,89 @@ def extract_sections(raw_html):
 
             regulatory_number += 1
 
-    raw_normalised = normalise(raw_html)
+    # FAST raw-source fallback.
+    # Do NOT normalise the whole Amazon HTML.  Instead find only the exact
+    # regulatory markers in the raw source and parse small bounded windows
+    # around those positions.  This retains the fallback for data embedded
+    # outside normal visible DOM sections while avoiding the multi-minute
+    # full-page regex seen on Render.
+    raw_hits = []
 
-    raw_pattern = re.compile(
-        r".{0,500}"
-        r"(?:organic inspection body code|"
-        r"\b[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3}\b)"
-        r".{0,900}",
-        re.I | re.S,
+    phrase_pattern = re.compile(
+        r"organic inspection body code",
+        re.I,
     )
 
-    for raw_match in raw_pattern.finditer(raw_normalised):
+    for match in phrase_pattern.finditer(raw_html):
+        raw_hits.append((match.start(), match.end()))
+        if len(raw_hits) >= 20:
+            break
+
+    if len(raw_hits) < 20:
+        for match in CONTROL_BODY_PATTERN.finditer(raw_html):
+            raw_hits.append((match.start(), match.end()))
+            if len(raw_hits) >= 20:
+                break
+
+    seen_windows = set()
+
+    for hit_start, hit_end in raw_hits:
+        left = max(0, hit_start - 900)
+        right = min(len(raw_html), hit_end + 1600)
+
+        # Prevent overlapping hits from making us parse essentially the same
+        # fragment repeatedly.
+        window_key = (left // 500, right // 500)
+        if window_key in seen_windows:
+            continue
+        seen_windows.add(window_key)
+
+        fragment = raw_html[left:right]
         text = normalise(
             BeautifulSoup(
-                raw_match.group(0),
+                fragment,
                 "html.parser",
             ).get_text(" ", strip=True)
         )
 
-        if text and text not in regulatory_seen:
-            regulatory_seen.add(text)
+        if not text:
+            continue
 
-            add_section(
-                sections,
-                f"Regulatory source data {regulatory_number}",
-                text,
-            )
+        if not (
+            "organic inspection body code" in text.lower()
+            or CONTROL_BODY_PATTERN.search(text)
+        ):
+            continue
 
-            regulatory_number += 1
+        if text in regulatory_seen:
+            continue
+
+        regulatory_seen.add(text)
+
+        add_section(
+            sections,
+            f"Regulatory source data {regulatory_number}",
+            text,
+        )
+
+        regulatory_number += 1
+
+    logger.info(
+        "EXTRACT_REGULATORY_DONE context=%s elapsed_ms=%s raw_hits=%s regulatory_sections=%s",
+        log_context or "-",
+        int((time.monotonic() - regulatory_started) * 1000),
+        len(raw_hits),
+        sum(1 for name in sections if name.startswith("Regulatory")),
+    )
+
+    logger.info(
+        "EXTRACT_DONE context=%s elapsed_ms=%s sections=%s",
+        log_context or "-",
+        int((time.monotonic() - extract_started) * 1000),
+        len(sections),
+    )
 
     return sections
-
 
 def make_pattern(term):
     term = normalise(term)
@@ -457,13 +543,43 @@ def result_from_payload(meta, payload):
 
         return item
 
-    sections = extract_sections(body)
+    processing_started = time.monotonic()
+
+    logger.info(
+        "PROCESS_START asin=%s marketplace=%s html_chars=%s build=%s",
+        asin,
+        marketplace,
+        len(body),
+        BUILD_ID,
+    )
+
+    sections = extract_sections(
+        body,
+        log_context=asin,
+    )
 
     item["sections_found"] = list(sections.keys())
     item["title"] = sections.get("Title", "")
+
+    match_started = time.monotonic()
     item["matches"] = find_matches(
         sections,
         build_search_terms(terms),
+    )
+
+    logger.info(
+        "PROCESS_MATCHES_DONE asin=%s elapsed_ms=%s matches=%s",
+        asin,
+        int((time.monotonic() - match_started) * 1000),
+        len(item["matches"]),
+    )
+
+    logger.info(
+        "PROCESS_DONE asin=%s elapsed_ms=%s sections=%s matches=%s",
+        asin,
+        int((time.monotonic() - processing_started) * 1000),
+        len(sections),
+        len(item["matches"]),
     )
 
     has_aplus = any(
