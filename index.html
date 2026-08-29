@@ -1,83 +1,29 @@
 <!doctype html>
 <html lang="en">
-
 <head>
-
   <meta charset="utf-8">
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover"
-  >
-
-  <meta
-    name="theme-color"
-    content="#111827"
-  >
-
-  <link
-    rel="manifest"
-    href="/manifest.webmanifest"
-  >
-
-  <title>
-    Amazon Listing Scanner
-  </title>
-
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>Amazon Listing Scanner</title>
   <style>
-
     :root {
-      font-family:
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
-
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #111827;
     }
-
-    body {
-      margin: 0;
-      background: #f3f4f6;
-    }
-
-    .wrap {
-      max-width: 850px;
-      margin: auto;
-      padding: 18px;
-    }
-
+    body { margin: 0; background: #f3f4f6; }
+    .wrap { max-width: 850px; margin: auto; padding: 18px; }
     .card {
       background: white;
       border-radius: 18px;
       padding: 18px;
-      box-shadow:
-        0 5px 22px
-        rgba(0,0,0,.07);
+      box-shadow: 0 5px 22px rgba(0,0,0,.07);
       margin-bottom: 15px;
     }
-
-    h1 {
-      font-size: 1.45rem;
-      margin: 0 0 6px;
-    }
-
-    .sub {
-      color: #6b7280;
-      font-size: .95rem;
-      margin-bottom: 15px;
-    }
-
-    label {
-      font-weight: 700;
-      display: block;
-      margin: 12px 0 6px;
-    }
-
-    textarea,
-    input,
-    select {
+    h1 { font-size: 1.45rem; margin: 0 0 6px; }
+    .sub { color: #6b7280; font-size: .95rem; margin-bottom: 15px; }
+    label { font-weight: 700; display: block; margin: 12px 0 6px; }
+    textarea, input, select {
       width: 100%;
       box-sizing: border-box;
       padding: 12px;
@@ -86,19 +32,8 @@
       font-size: 16px;
       background: white;
     }
-
-    textarea {
-      min-height: 160px;
-      resize: vertical;
-    }
-
-    .toolbar {
-      display: grid;
-      grid-template-columns:
-        1fr 1fr;
-      gap: 10px;
-    }
-
+    textarea { min-height: 160px; resize: vertical; }
+    .toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     button {
       width: 100%;
       border: 0;
@@ -110,34 +45,15 @@
       background: #111827;
       color: white;
     }
-
-    button:disabled {
-      opacity: .5;
-    }
-
-    .summary {
-      font-weight: 800;
-      margin-bottom: 8px;
-    }
-
-    .progress {
-      font-size: .9rem;
-      color: #4b5563;
-    }
-
+    button:disabled { opacity: .5; }
+    .summary { font-weight: 800; margin-bottom: 8px; }
+    .progress { font-size: .9rem; color: #4b5563; }
     .result {
-      border-top:
-        1px solid #e5e7eb;
-
+      border-top: 1px solid #e5e7eb;
       padding-top: 14px;
       margin-top: 14px;
     }
-
-    .asin {
-      font-size: 1.05rem;
-      font-weight: 900;
-    }
-
+    .asin { font-size: 1.05rem; font-weight: 900; }
     .pill {
       display: inline-block;
       padding: 5px 9px;
@@ -147,47 +63,13 @@
       margin-left: 5px;
       background: #e5e7eb;
     }
-
-    .matched {
-      background: #fee2e2;
-      color: #991b1b;
-    }
-
-    .clear {
-      background: #dcfce7;
-      color: #166534;
-    }
-
-    .scanning,
-    .submitted {
-      background: #dbeafe;
-      color: #1d4ed8;
-    }
-
-    .incomplete,
-    .poll_error {
-      background: #fef3c7;
-      color: #92400e;
-    }
-
-    .fetch_failed,
-    .submit_failed,
-    .blocked {
-      background: #fee2e2;
-      color: #991b1b;
-    }
-
-    .title {
-      margin-top: 7px;
-      color: #374151;
-      font-weight: 600;
-    }
-
-    .small {
-      font-size: .82rem;
-      color: #6b7280;
-    }
-
+    .matched { background: #fee2e2; color: #991b1b; }
+    .clear { background: #dcfce7; color: #166534; }
+    .scanning, .submitted { background: #dbeafe; color: #1d4ed8; }
+    .incomplete, .poll_error { background: #fef3c7; color: #92400e; }
+    .fetch_failed, .submit_failed, .blocked { background: #fee2e2; color: #991b1b; }
+    .title { margin-top: 7px; color: #374151; font-weight: 600; }
+    .small { font-size: .82rem; color: #6b7280; }
     .diag {
       margin-top: 8px;
       padding: 10px;
@@ -197,7 +79,6 @@
       font-size: .88rem;
       word-break: break-word;
     }
-
     .match {
       margin-top: 10px;
       background: #f9fafb;
@@ -205,22 +86,9 @@
       border-radius: 10px;
       font-size: .9rem;
     }
-
-    .match b {
-      display: block;
-      margin-bottom: 5px;
-    }
-
-    details {
-      margin-top: 8px;
-    }
-
-    summary {
-      cursor: pointer;
-      font-weight: 800;
-      color: #2563eb;
-    }
-
+    .match b { display: block; margin-bottom: 5px; }
+    details { margin-top: 8px; }
+    summary { cursor: pointer; font-weight: 800; color: #2563eb; }
     .fulltext {
       margin-top: 8px;
       white-space: pre-wrap;
@@ -232,58 +100,27 @@
       max-height: 55vh;
       overflow: auto;
     }
-
-    a {
-      color: #2563eb;
-    }
-
+    a { color: #2563eb; }
     @media (max-width: 600px) {
-      .toolbar {
-        grid-template-columns:
-          1fr;
-      }
+      .toolbar { grid-template-columns: 1fr; }
     }
-
   </style>
-
 </head>
-
-
 <body>
-
 <div class="wrap">
-
   <div class="card">
-
-    <h1>
-      Amazon Live Listing Scanner
-    </h1>
-
+    <h1>Amazon Live Listing Scanner</h1>
     <div class="sub">
-      Async scanner for A+ content,
-      organic wording and Amazon
-      Regulatory Information.
+      Async scanner for A+ content, organic wording and Amazon Regulatory Information.
     </div>
 
-    <label>
-      ASINs
-    </label>
-
-    <textarea
-      id="asins"
-      placeholder="One per line"
-    ></textarea>
+    <label>ASINs</label>
+    <textarea id="asins" placeholder="One per line"></textarea>
 
     <div class="toolbar">
-
       <div>
-
-        <label>
-          Marketplace
-        </label>
-
+        <label>Marketplace</label>
         <select id="marketplace">
-
           <option>UK</option>
           <option>DE</option>
           <option>FR</option>
@@ -291,908 +128,336 @@
           <option>ES</option>
           <option>NL</option>
           <option>IE</option>
-
         </select>
-
       </div>
-
 
       <div>
-
-        <label>
-          Search terms
-        </label>
-
-        <input
-          id="terms"
-          value="organic, bio, eco, LU-BIO-04"
-        >
-
+        <label>Search terms</label>
+        <input id="terms" value="organic, bio, eco, LU-BIO-04">
       </div>
-
     </div>
 
-
-    <button id="scan">
-      Scan live listings
-    </button>
-
+    <button id="scan">Scan live listings</button>
 
     <p class="small">
-      Scans run as background jobs,
-      so Chrome no longer has to hold
-      one long Amazon request open.
+      ScraperAPI runs the Amazon request in the background. The app checks for the result without holding a long browser request open.
     </p>
-
   </div>
 
-
-  <div
-    class="card"
-    id="output"
-    style="display:none"
-  >
-
-    <div
-      class="summary"
-      id="summary"
-    ></div>
-
-    <div
-      class="progress"
-      id="progress"
-    ></div>
-
+  <div class="card" id="output" style="display:none">
+    <div class="summary" id="summary"></div>
+    <div class="progress" id="progress"></div>
     <div id="results"></div>
-
   </div>
-
 </div>
 
-
 <script>
-
-const scanButton =
-  document.getElementById("scan");
-
-const output =
-  document.getElementById("output");
-
-const summary =
-  document.getElementById("summary");
-
-const progress =
-  document.getElementById("progress");
-
-const resultsBox =
-  document.getElementById("results");
-
+const scanButton = document.getElementById("scan");
+const output = document.getElementById("output");
+const summary = document.getElementById("summary");
+const progress = document.getElementById("progress");
+const resultsBox = document.getElementById("results");
 
 let running = false;
-
 let completedCount = 0;
-
 let totalCount = 0;
-
 let matchedCount = 0;
 
-
 if ("serviceWorker" in navigator) {
-
-  navigator
-    .serviceWorker
-    .getRegistrations()
-    .then(
-      registrations =>
-        registrations.forEach(
-          registration =>
-            registration.unregister()
-        )
-    )
+  navigator.serviceWorker.getRegistrations()
+    .then(registrations => registrations.forEach(registration => registration.unregister()))
     .catch(() => {});
-
-
-  if ("caches" in window) {
-
-    caches
-      .keys()
-      .then(
-        keys =>
-          Promise.all(
-            keys.map(
-              key =>
-                caches.delete(key)
-            )
-          )
-      )
-      .catch(() => {});
-
-  }
-
 }
 
+if ("caches" in window) {
+  caches.keys()
+    .then(keys => Promise.all(keys.map(key => caches.delete(key))))
+    .catch(() => {});
+}
 
 function esc(value = "") {
-
-  return String(value).replace(
-    /[&<>"']/g,
-
-    character => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#039;"
-    }[character])
-
-  );
-
+  return String(value).replace(/[&<>"']/g, character => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[character]));
 }
-
 
 function sleep(ms) {
-
-  return new Promise(
-    resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
-  );
-
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-
-async function fetchJsonWithTimeout(
-  url,
-  options = {},
-  timeoutMs = 20000
-) {
-
-  const controller =
-    new AbortController();
-
-  const timer =
-    setTimeout(
-      () =>
-        controller.abort(),
-      timeoutMs
-    );
-
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-
-    const response =
-      await fetch(
-        url,
-        {
-          ...options,
-          signal:
-            controller.signal
-        }
-      );
-
+    const response = await fetch(url, { ...options, signal: controller.signal });
 
     let data;
-
-
     try {
-
-      data =
-        await response.json();
-
+      data = await response.json();
     } catch {
-
-      throw new Error(
-        "E302 INVALID_SERVER_JSON"
-      );
-
+      throw new Error("E302 INVALID_SERVER_JSON");
     }
-
 
     if (!response.ok) {
-
-      const detail =
-        data.detail
-        || `HTTP ${response.status}`;
-
-      throw new Error(
-        detail
-      );
-
+      throw new Error(data.detail || `HTTP ${response.status}`);
     }
-
 
     return data;
-
-
   } catch (error) {
-
-    if (
-      error.name
-      === "AbortError"
-    ) {
-
-      throw new Error(
-        "E301 FRONTEND_REQUEST_TIMEOUT"
-      );
-
+    if (error.name === "AbortError") {
+      throw new Error("E301 FRONTEND_REQUEST_TIMEOUT");
     }
 
-
-    if (
-      String(
-        error.message
-        || ""
-      ).startsWith("E")
-    ) {
-
+    if (String(error.message || "").startsWith("E")) {
       throw error;
-
     }
-
 
     throw new Error(
-      "E300 FRONTEND_FETCH_ERROR: "
-      + String(
-          error.message
-          || error
-        )
+      "E300 FRONTEND_FETCH_ERROR: " + String(error.message || error)
     );
-
-
   } finally {
-
     clearTimeout(timer);
-
   }
-
 }
-
 
 function statusLabel(status) {
-
-  return String(
-    status
-    || "unknown"
-  ).replaceAll(
-    "_",
-    " "
-  );
-
+  return String(status || "unknown").replaceAll("_", " ");
 }
-
 
 function resultId(asin) {
-
-  return (
-    "result-"
-    + asin
-  );
-
+  return "result-" + asin;
 }
-
 
 function ensureResultCard(asin) {
+  let card = document.getElementById(resultId(asin));
+  if (card) return card;
 
-  let card =
-    document.getElementById(
-      resultId(asin)
-    );
-
-
-  if (card) {
-    return card;
-  }
-
-
-  card =
-    document.createElement(
-      "div"
-    );
-
-  card.className =
-    "result";
-
-  card.id =
-    resultId(asin);
-
-  resultsBox.appendChild(
-    card
-  );
-
-
+  card = document.createElement("div");
+  card.className = "result";
+  card.id = resultId(asin);
+  resultsBox.appendChild(card);
   return card;
-
 }
-
 
 function renderResult(item) {
+  const card = ensureResultCard(item.asin || "unknown");
+  const status = item.status || "unknown";
+  const matches = Array.isArray(item.matches) ? item.matches : [];
 
-  const card =
-    ensureResultCard(
-      item.asin
-    );
+  const matchesHtml = matches.map(match => `
+    <div class="match">
+      <b>${esc(match.term)} — ${esc(match.section)}</b>
+      <div>${esc(match.snippet || "")}</div>
+      <details>
+        <summary>Show full section</summary>
+        <div class="fulltext">${esc(match.full_text || match.snippet || "")}</div>
+      </details>
+    </div>
+  `).join("");
 
+  const diagnostics = (item.warning || item.error_code)
+    ? `<div class="diag">${esc(item.warning || item.error_code)}</div>`
+    : "";
 
-  const status =
-    item.status
-    || "unknown";
+  const title = item.title
+    ? `<div class="title">${esc(item.title)}</div>`
+    : "";
 
+  const link = item.url
+    ? `<div class="small"><a href="${esc(item.url)}" target="_blank" rel="noopener">Open Amazon listing</a></div>`
+    : "";
 
-  const matches =
-    Array.isArray(
-      item.matches
-    )
-      ? item.matches
-      : [];
-
-
-  const matchesHtml =
-    matches.map(
-      match => `
-
-        <div class="match">
-
-          <b>
-            ${esc(match.term)}
-            —
-            ${esc(match.section)}
-          </b>
-
-          <div>
-            ${esc(
-              match.snippet
-              || ""
-            )}
-          </div>
-
-          <details>
-
-            <summary>
-              Show full section
-            </summary>
-
-            <div class="fulltext">
-              ${esc(
-                match.full_text
-                || match.snippet
-                || ""
-              )}
-            </div>
-
-          </details>
-
-        </div>
-
-      `
-    ).join("");
-
-
-  const diagnostics =
-    item.warning
-    || item.error_code
-
-      ? `
-        <div class="diag">
-          ${esc(
-            item.warning
-            || item.error_code
-          )}
-        </div>
-      `
-
-      : "";
-
-
-  const attempts =
-    item.attempts !== undefined
-    && item.attempts !== null
-
-      ? `
-        <div class="small">
-          Scraper attempts:
-          ${esc(item.attempts)}
-        </div>
-      `
-
-      : "";
-
-
-  const title =
-    item.title
-
-      ? `
-        <div class="title">
-          ${esc(item.title)}
-        </div>
-      `
-
-      : "";
-
-
-  const link =
-    item.url
-
-      ? `
-        <div class="small">
-
-          <a
-            href="${esc(item.url)}"
-            target="_blank"
-            rel="noopener"
-          >
-            Open Amazon listing
-          </a>
-
-        </div>
-      `
-
-      : "";
-
+  const attempts = item.attempts !== undefined && item.attempts !== null
+    ? `<div class="small">Scraper attempts: ${esc(item.attempts)}</div>`
+    : "";
 
   card.innerHTML = `
-
     <div>
-
-      <span class="asin">
-        ${esc(item.asin)}
-      </span>
-
-      <span
-        class="pill ${esc(status)}"
-      >
-        ${esc(
-          statusLabel(status)
-        )}
-      </span>
-
+      <span class="asin">${esc(item.asin || "")}</span>
+      <span class="pill ${esc(status)}">${esc(statusLabel(status))}</span>
     </div>
-
     ${title}
-
     ${link}
-
     ${attempts}
-
     ${diagnostics}
-
     ${matchesHtml}
-
   `;
-
 }
-
 
 function updateProgress() {
-
-  summary.innerHTML =
-    `<b>${matchedCount}</b> matched`;
-
-  progress.textContent =
-    `${completedCount}/${totalCount} finished`;
-
+  summary.innerHTML = `<b>${matchedCount}</b> matched`;
+  progress.textContent = `${completedCount}/${totalCount} finished`;
 }
-
 
 function markFinished(item) {
-
   completedCount += 1;
-
-
-  if (
-    item.status
-    === "matched"
-  ) {
-
+  if (item.status === "matched") {
     matchedCount += 1;
-
   }
-
-
   renderResult(item);
-
   updateProgress();
-
 }
 
-
-async function pollJob(
-  job,
-  marketplace,
-  terms
-) {
-
+async function pollScan(job) {
+  const startedAt = Date.now();
   let transientErrors = 0;
 
-
   renderResult({
-
-    asin:
-      job.asin,
-
-    status:
-      "scanning",
-
-    warning:
-      "Async job submitted. Waiting for ScraperAPI..."
-
+    asin: job.asin,
+    status: "scanning",
+    warning: "Async job submitted. Waiting for ScraperAPI result..."
   });
 
-
   while (true) {
+    await sleep(3000);
 
-    await sleep(3500);
-
-
-    let data;
-
-
-    try {
-
-      data =
-        await fetchJsonWithTimeout(
-
-          "/api/scan-status",
-
-          {
-            method:
-              "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json"
-            },
-
-            body:
-              JSON.stringify({
-                job_id:
-                  job.job_id,
-
-                asin:
-                  job.asin,
-
-                marketplace,
-
-                terms
-              })
-          },
-
-          20000
-
-        );
-
-
-    } catch (error) {
-
-      transientErrors += 1;
-
-
-      renderResult({
-
-        asin:
-          job.asin,
-
-        status:
-          "poll_error",
-
-        error_code:
-          "E303 FRONTEND_POLL_ERROR",
-
-        warning:
-          `E303 FRONTEND_POLL_ERROR: ${error.message}. Retry ${transientErrors}/4.`
-
+    if (Date.now() - startedAt > 12 * 60 * 1000) {
+      markFinished({
+        asin: job.asin,
+        status: "fetch_failed",
+        error_code: "E306 SCAN_WATCHDOG_TIMEOUT",
+        warning: "E306 SCAN_WATCHDOG_TIMEOUT: no result was received within 12 minutes."
       });
-
-
-      if (
-        transientErrors >= 4
-      ) {
-
-        markFinished({
-
-          asin:
-            job.asin,
-
-          status:
-            "fetch_failed",
-
-          error_code:
-            "E304 FRONTEND_POLL_ABORTED",
-
-          warning:
-            "E304 FRONTEND_POLL_ABORTED: four consecutive status checks failed."
-
-        });
-
-
-        return;
-
-      }
-
-
-      continue;
-
-    }
-
-
-    transientErrors = 0;
-
-
-    if (
-      data.status
-      === "scanning"
-    ) {
-
-      renderResult({
-
-        ...data,
-
-        asin:
-          job.asin,
-
-        status:
-          "scanning",
-
-        warning:
-          `ScraperAPI job status: ${data.job_status || "running"}`
-
-      });
-
-
-      continue;
-
-    }
-
-
-    if (
-      data.status
-      === "poll_error"
-    ) {
-
-      transientErrors += 1;
-
-      renderResult(data);
-
-
-      if (
-        transientErrors >= 4
-      ) {
-
-        markFinished({
-
-          asin:
-            job.asin,
-
-          status:
-            "fetch_failed",
-
-          error_code:
-            "E305 ASYNC_STATUS_RETRIES_EXHAUSTED",
-
-          warning:
-            "E305 ASYNC_STATUS_RETRIES_EXHAUSTED: repeated ScraperAPI status checks failed."
-
-        });
-
-
-        return;
-
-      }
-
-
-      continue;
-
-    }
-
-
-    markFinished(data);
-
-    return;
-
-  }
-
-}
-
-
-scanButton.onclick =
-  async () => {
-
-    if (running) {
       return;
     }
 
-
-    const asins =
-      document
-        .getElementById("asins")
-        .value
-        .split(/[\s,;]+/)
-        .map(
-          value =>
-            value.trim()
-        )
-        .filter(Boolean);
-
-
-    const terms =
-      document
-        .getElementById("terms")
-        .value
-        .split(",")
-        .map(
-          value =>
-            value.trim()
-        )
-        .filter(Boolean);
-
-
-    const marketplace =
-      document
-        .getElementById("marketplace")
-        .value;
-
-
-    running = true;
-
-
-    scanButton.disabled =
-      true;
-
-
-    scanButton.textContent =
-      "Starting scan…";
-
-
-    output.style.display =
-      "block";
-
-
-    resultsBox.innerHTML =
-      "";
-
-
-    completedCount = 0;
-
-    matchedCount = 0;
-
-    totalCount =
-      asins.length;
-
-
-    summary.textContent =
-      "Submitting async jobs…";
-
-
-    progress.textContent =
-      "";
-
+    let data;
 
     try {
+      data = await fetchJsonWithTimeout(
+        "/api/scan-status",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: job.token })
+        },
+        10000
+      );
+    } catch (error) {
+      transientErrors += 1;
 
-      const start =
-        await fetchJsonWithTimeout(
+      renderResult({
+        asin: job.asin,
+        status: "poll_error",
+        error_code: "E303 FRONTEND_POLL_ERROR",
+        warning: `E303 FRONTEND_POLL_ERROR: ${error.message}. Retry ${transientErrors}/20.`
+      });
 
-          "/api/scan-start",
-
-          {
-            method:
-              "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json"
-            },
-
-            body:
-              JSON.stringify({
-                asins,
-                marketplace,
-                terms
-              })
-          },
-
-          25000
-
-        );
-
-
-      const jobs =
-        Array.isArray(
-          start.jobs
-        )
-          ? start.jobs
-          : [];
-
-
-      totalCount =
-        jobs.length;
-
-
-      updateProgress();
-
-
-      const pollers = [];
-
-
-      for (
-        const job
-        of jobs
-      ) {
-
-        if (
-          job.status
-          !== "submitted"
-        ) {
-
-          markFinished(job);
-
-          continue;
-
-        }
-
-
-        pollers.push(
-
-          pollJob(
-            job,
-            marketplace,
-            terms
-          )
-
-        );
-
+      if (transientErrors >= 20) {
+        markFinished({
+          asin: job.asin,
+          status: "fetch_failed",
+          error_code: "E304 FRONTEND_POLL_ABORTED",
+          warning: "E304 FRONTEND_POLL_ABORTED: 20 consecutive checks of the Render app failed."
+        });
+        return;
       }
 
-
-      await Promise.all(
-        pollers
-      );
-
-
-    } catch (error) {
-
-      summary.textContent =
-        "Scan could not start";
-
-
-      progress.textContent =
-        "";
-
-
-      resultsBox.innerHTML = `
-
-        <div class="diag">
-
-          ${esc(
-            error.message
-            || "E300 UNKNOWN_FRONTEND_ERROR"
-          )}
-
-        </div>
-
-      `;
-
-
-    } finally {
-
-      running =
-        false;
-
-
-      scanButton.disabled =
-        false;
-
-
-      scanButton.textContent =
-        "Scan live listings";
-
+      continue;
     }
 
-  };
+    transientErrors = 0;
 
+    if (data.status === "scanning") {
+      renderResult({
+        ...data,
+        asin: job.asin,
+        status: "scanning",
+        warning: "Waiting for ScraperAPI result..."
+      });
+      continue;
+    }
+
+    if (data.status === "poll_error") {
+      renderResult({ ...data, asin: job.asin });
+      continue;
+    }
+
+    markFinished({
+      ...data,
+      asin: data.asin || job.asin
+    });
+    return;
+  }
+}
+
+scanButton.onclick = async () => {
+  if (running) return;
+
+  const asins = document.getElementById("asins").value
+    .split(/[\s,;]+/)
+    .map(value => value.trim())
+    .filter(Boolean);
+
+  const terms = document.getElementById("terms").value
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean);
+
+  const marketplace = document.getElementById("marketplace").value;
+
+  running = true;
+  scanButton.disabled = true;
+  scanButton.textContent = "Starting scan…";
+  output.style.display = "block";
+  resultsBox.innerHTML = "";
+
+  completedCount = 0;
+  matchedCount = 0;
+  totalCount = asins.length;
+
+  summary.textContent = "Submitting async jobs…";
+  progress.textContent = "";
+
+  try {
+    const start = await fetchJsonWithTimeout(
+      "/api/scan-start",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asins, marketplace, terms })
+      },
+      20000
+    );
+
+    const jobs = Array.isArray(start.jobs) ? start.jobs : [];
+    totalCount = jobs.length;
+    updateProgress();
+
+    const pollers = [];
+
+    for (const job of jobs) {
+      if (job.status !== "submitted") {
+        markFinished({
+          asin: job.asin,
+          status: job.status || "submit_failed",
+          warning: job.warning,
+          error_code: job.error_code
+        });
+        continue;
+      }
+
+      pollers.push(pollScan(job));
+    }
+
+    await Promise.all(pollers);
+  } catch (error) {
+    summary.textContent = "Scan could not start";
+    progress.textContent = "";
+    resultsBox.innerHTML = `
+      <div class="diag">${esc(error.message || "E300 UNKNOWN_FRONTEND_ERROR")}</div>
+    `;
+  } finally {
+    running = false;
+    scanButton.disabled = false;
+    scanButton.textContent = "Scan live listings";
+  }
+};
 </script>
-
 </body>
-
 </html>
