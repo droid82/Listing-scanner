@@ -133,10 +133,7 @@ def extract_aplus(soup, sections):
             )
         )
 
-        if len(text) < 20:
-            continue
-
-        if text in seen:
+        if len(text) < 20 or text in seen:
             continue
 
         seen.add(text)
@@ -168,17 +165,14 @@ def extract_regulatory(
         r"organic inspection body code|"
         r"regulatory information|"
         r"safety and product resources|"
-        r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO"
-        r"[\s\-–—−‐-]*\d{2,3}\b",
+        r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO[\s\-–—−‐-]*\d{2,3}\b",
         re.I,
     )
 
     seen = set()
     number = 1
 
-    for text_node in soup.find_all(
-        string=marker
-    ):
+    for text_node in soup.find_all(string=marker):
         node = text_node.parent
         chosen = ""
 
@@ -203,9 +197,7 @@ def extract_regulatory(
                     "organic inspection body code"
                     in candidate.lower()
                     or re.search(
-                        r"\b[A-Z]{2,3}"
-                        r"[\s-]*BIO"
-                        r"[\s-]*\d{2,3}\b",
+                        r"\b[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3}\b",
                         candidate,
                         re.I,
                     )
@@ -214,10 +206,7 @@ def extract_regulatory(
 
             node = node.parent
 
-        if (
-            chosen
-            and chosen not in seen
-        ):
+        if chosen and chosen not in seen:
             seen.add(chosen)
 
             add_section(
@@ -229,15 +218,12 @@ def extract_regulatory(
 
             number += 1
 
-    raw_normalized = normalize(
-        raw_html
-    )
+    raw_normalized = normalize(raw_html)
 
     fallback = re.compile(
         r".{0,500}"
         r"(?:organic inspection body code|"
-        r"\b[A-Z]{2,3}[\s-]*BIO"
-        r"[\s-]*\d{2,3}\b)"
+        r"\b[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3}\b)"
         r".{0,900}",
         re.I | re.S,
     )
@@ -257,10 +243,7 @@ def extract_regulatory(
             )
         )
 
-        if (
-            text
-            and text not in seen
-        ):
+        if text and text not in seen:
             seen.add(text)
 
             add_section(
@@ -315,17 +298,13 @@ def make_pattern(term):
 
     if lower == "bio":
         return re.compile(
-            r"(?<![A-Za-z0-9])"
-            r"bio"
-            r"(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])bio(?![A-Za-z0-9])",
             re.I,
         )
 
     if lower == "eco":
         return re.compile(
-            r"(?<![A-Za-z0-9])"
-            r"eco"
-            r"(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])eco(?![A-Za-z0-9])",
             re.I,
         )
 
@@ -363,10 +342,7 @@ def build_search_terms(user_terms):
         term = normalize(term)
         key = term.lower()
 
-        if (
-            term
-            and key not in seen
-        ):
+        if term and key not in seen:
             seen.add(key)
             combined.append(term)
 
@@ -450,35 +426,22 @@ def find_matches(
 
 def error_code_for_http(status):
     if status == 401:
-        return (
-            "E110 "
-            "SCRAPERAPI_KEY_ERROR"
-        )
+        return "E110 SCRAPERAPI_KEY_ERROR"
 
     if status == 403:
-        return (
-            "E102 "
-            "SCRAPERAPI_HTTP_403"
-        )
+        return "E102 SCRAPERAPI_HTTP_403"
 
     if status == 429:
-        return (
-            "E103 "
-            "SCRAPERAPI_HTTP_429"
-        )
+        return "E103 SCRAPERAPI_HTTP_429"
 
-    if (
-        500 <= status <= 599
-    ):
+    if 500 <= status <= 599:
         return (
-            "E104 "
-            "SCRAPERAPI_HTTP_"
+            "E104 SCRAPERAPI_HTTP_"
             + str(status)
         )
 
     return (
-        "E120 "
-        "SCRAPERAPI_HTTP_"
+        "E120 SCRAPERAPI_HTTP_"
         + str(status)
     )
 
@@ -503,14 +466,16 @@ def scraper_request(
     if render:
         params["render"] = "true"
 
+    timeout = (
+        25
+        if not render
+        else 35
+    )
+
     return requests.get(
         SCRAPERAPI_URL,
         params=params,
-        timeout=(
-            25
-            if not render
-            else 35
-        ),
+        timeout=timeout,
     )
 
 
@@ -535,20 +500,15 @@ def scan(req: ScanRequest):
     if marketplace not in MARKETPLACES:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "E001 "
-                "UNSUPPORTED_MARKETPLACE"
-            ),
+            detail="E001 UNSUPPORTED_MARKETPLACE",
         )
 
     if not SCRAPERAPI_KEY:
         raise HTTPException(
             status_code=500,
             detail=(
-                "E110 "
-                "SCRAPERAPI_KEY_ERROR: "
-                "SCRAPERAPI_KEY is missing "
-                "in Render."
+                "E110 SCRAPERAPI_KEY_ERROR: "
+                "SCRAPERAPI_KEY is missing in Render."
             ),
         )
 
@@ -570,10 +530,7 @@ def scan(req: ScanRequest):
     if not asins:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "E002 "
-                "NO_VALID_ASINS"
-            ),
+            detail="E002 NO_VALID_ASINS",
         )
 
     search_terms = (
@@ -631,8 +588,7 @@ def scan(req: ScanRequest):
 
                 item["warning"] = (
                     code
-                    + ": ScraperAPI raw "
-                    "HTML request returned HTTP "
+                    + ": ScraperAPI raw HTML request returned HTTP "
                     + str(
                         response.status_code
                     )
@@ -650,14 +606,12 @@ def scan(req: ScanRequest):
                 )
 
                 item["error_code"] = (
-                    "E130 "
-                    "AMAZON_CAPTCHA"
+                    "E130 AMAZON_CAPTCHA"
                 )
 
                 item["warning"] = (
                     "E130 AMAZON_CAPTCHA: "
-                    "Amazon returned a "
-                    "robot/CAPTCHA page."
+                    "Amazon returned a robot/CAPTCHA page."
                 )
 
                 results.append(item)
@@ -749,8 +703,7 @@ def scan(req: ScanRequest):
                             error_code_for_http(
                                 rendered.status_code
                             )
-                            + ": render fallback "
-                            "returned HTTP "
+                            + ": render fallback returned HTTP "
                             + str(
                                 rendered.status_code
                             )
@@ -761,6 +714,176 @@ def scan(req: ScanRequest):
                     item[
                         "warning"
                     ] = (
-                        "E101 "
-                        "SCRAPERAPI_TIMEOUT: "
-                        "
+                        "E101 SCRAPERAPI_TIMEOUT: "
+                        "render fallback timed out; "
+                        "raw HTML result was kept."
+                    )
+
+            item["title"] = (
+                sections.get(
+                    "Title",
+                    "",
+                )
+            )
+
+            item[
+                "sections_found"
+            ] = list(
+                sections.keys()
+            )
+
+            item["matches"] = (
+                find_matches(
+                    sections,
+                    search_terms,
+                )
+            )
+
+            has_regulatory = any(
+                name.startswith(
+                    "Regulatory"
+                )
+                for name in sections
+            )
+
+            if item["matches"]:
+                item["status"] = (
+                    "matched"
+                )
+
+            elif not item["title"]:
+                item["status"] = (
+                    "incomplete"
+                )
+
+                item["error_code"] = (
+                    "E106 AMAZON_DATA_EMPTY"
+                )
+
+                item["warning"] = (
+                    "E106 AMAZON_DATA_EMPTY: "
+                    "Amazon HTML was returned, "
+                    "but the product title could not be extracted."
+                )
+
+            elif not has_regulatory:
+                item["status"] = (
+                    "incomplete"
+                )
+
+                item["error_code"] = (
+                    "E108 REGULATORY_DATA_NOT_RETURNED"
+                )
+
+                if not item["warning"]:
+                    item["warning"] = (
+                        "E108 REGULATORY_DATA_NOT_RETURNED: "
+                        "product content was retrieved, "
+                        "but Amazon Regulatory Information "
+                        "was not exposed in the raw HTML "
+                        "or render fallback. "
+                        "This ASIN is not confirmed clear."
+                    )
+
+            else:
+                item["status"] = (
+                    "clear"
+                )
+
+            results.append(item)
+
+        except requests.Timeout:
+            item["status"] = (
+                "fetch_failed"
+            )
+
+            item["error_code"] = (
+                "E101 SCRAPERAPI_TIMEOUT"
+            )
+
+            item["warning"] = (
+                "E101 SCRAPERAPI_TIMEOUT: "
+                "ScraperAPI did not return "
+                "the Amazon page before the request timeout."
+            )
+
+            results.append(item)
+
+        except requests.ConnectionError as error:
+            item["status"] = (
+                "fetch_failed"
+            )
+
+            item["error_code"] = (
+                "E109 UPSTREAM_CONNECTION_ERROR"
+            )
+
+            item["warning"] = (
+                "E109 UPSTREAM_CONNECTION_ERROR: "
+                + str(error)
+            )
+
+            results.append(item)
+
+        except requests.RequestException as error:
+            item["status"] = (
+                "fetch_failed"
+            )
+
+            item["error_code"] = (
+                "E111 SCRAPERAPI_REQUEST_ERROR"
+            )
+
+            item["warning"] = (
+                "E111 SCRAPERAPI_REQUEST_ERROR: "
+                + str(error)
+            )
+
+            results.append(item)
+
+        except Exception as error:
+            item["status"] = (
+                "fetch_failed"
+            )
+
+            item["error_code"] = (
+                "E199 APP_PROCESSING_ERROR"
+            )
+
+            item["warning"] = (
+                "E199 APP_PROCESSING_ERROR: "
+                + type(error).__name__
+                + ": "
+                + str(error)
+            )
+
+            results.append(item)
+
+    return {
+        "marketplace": marketplace,
+        "count": len(results),
+        "results": results,
+    }
+
+
+@app.get("/")
+def home():
+    return FileResponse(
+        "index.html"
+    )
+
+
+@app.get("/manifest.webmanifest")
+def manifest():
+    return FileResponse(
+        "manifest.webmanifest",
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(
+        "sw.js",
+        media_type="application/javascript",
+    )
