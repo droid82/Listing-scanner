@@ -20,9 +20,12 @@ MARKETPLACES = {
     "IE": "https://www.amazon.ie/dp/{}",
 }
 
+SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
+ASYNC_JOBS_URL = "https://async.scraperapi.com/jobs"
+
 DEFAULT_TERMS = ["organic", "bio", "eco", "lu-bio-04"]
 
-BUILT_IN_ORGANIC_TERMS = [
+BUILT_IN_TERMS = [
     "organic",
     "organically",
     "certified organic",
@@ -34,17 +37,26 @@ BUILT_IN_ORGANIC_TERMS = [
     "ecological",
 ]
 
-SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
-SCRAPERAPI_URL = "https://api.scraperapi.com/"
+CONTROL_BODY_PATTERN = re.compile(
+    r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO[\s\-–—−‐-]*\d{2,3}\b",
+    re.I,
+)
 
 
-class ScanRequest(BaseModel):
+class StartRequest(BaseModel):
     asins: List[str]
     marketplace: str = "UK"
     terms: List[str] = DEFAULT_TERMS
 
 
-def normalize(text):
+class StatusRequest(BaseModel):
+    job_id: str
+    asin: str
+    marketplace: str = "UK"
+    terms: List[str] = DEFAULT_TERMS
+
+
+def normalise(text):
     text = html_lib.unescape(str(text or ""))
 
     for dash in ("–", "—", "−", "‐", "-"):
@@ -53,14 +65,22 @@ def normalize(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def clean_asin(raw):
+    asin = re.sub(r"[^A-Z0-9]", "", str(raw).upper())
+    return asin if len(asin) == 10 else ""
+
+
 def add_section(sections, name, text):
-    text = normalize(text)
+    text = normalise(text)
 
     if text and text not in sections.values():
         sections[name] = text
 
 
-def extract_standard_sections(soup, sections):
+def extract_sections(raw_html):
+    soup = BeautifulSoup(raw_html, "html.parser")
+    sections = {}
+
     title = soup.select_one("#productTitle")
 
     if title:
@@ -108,71 +128,67 @@ def extract_standard_sections(soup, sections):
                 node.get_text(" ", strip=True),
             )
 
-
-def extract_aplus(soup, sections):
-    root = (
+    aplus = (
         soup.select_one("#aplus_feature_div")
         or soup.select_one("#aplus")
     )
 
-    if not root:
-        return
-
-    modules = root.select(
-        ".aplus-module, .premium-aplus-module"
-    )
-
-    seen = set()
-    number = 1
-
-    for module in modules:
-        text = normalize(
-            module.get_text(
-                " ",
-                strip=True,
-            )
+    if aplus:
+        modules = aplus.select(
+            ".aplus-module, .premium-aplus-module"
         )
 
-        if len(text) < 20 or text in seen:
-            continue
+        seen_modules = set()
+        module_number = 1
 
-        seen.add(text)
+        for module in modules:
+            text = normalise(
+                module.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if (
+                len(text) < 20
+                or text in seen_modules
+            ):
+                continue
+
+            seen_modules.add(text)
+
+            add_section(
+                sections,
+                "A+ module " + str(module_number),
+                text,
+            )
+
+            module_number += 1
 
         add_section(
             sections,
-            "A+ module " + str(number),
-            text,
+            "A+ full content",
+            aplus.get_text(
+                " ",
+                strip=True,
+            ),
         )
 
-        number += 1
-
-    add_section(
-        sections,
-        "A+ full content",
-        root.get_text(
-            " ",
-            strip=True,
-        ),
-    )
-
-
-def extract_regulatory(
-    soup,
-    raw_html,
-    sections,
-):
-    marker = re.compile(
+    regulatory_marker = re.compile(
         r"organic inspection body code|"
         r"regulatory information|"
         r"safety and product resources|"
-        r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO[\s\-–—−‐-]*\d{2,3}\b",
+        r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO"
+        r"[\s\-–—−‐-]*\d{2,3}\b",
         re.I,
     )
 
-    seen = set()
-    number = 1
+    regulatory_seen = set()
+    regulatory_number = 1
 
-    for text_node in soup.find_all(string=marker):
+    for text_node in soup.find_all(
+        string=regulatory_marker
+    ):
         node = text_node.parent
         chosen = ""
 
@@ -180,7 +196,7 @@ def extract_regulatory(
             if node is None:
                 break
 
-            candidate = normalize(
+            candidate = normalise(
                 node.get_text(
                     " ",
                     strip=True,
@@ -189,53 +205,51 @@ def extract_regulatory(
 
             if (
                 20 <= len(candidate) <= 3000
-                and marker.search(candidate)
+                and regulatory_marker.search(candidate)
             ):
                 chosen = candidate
 
                 if (
                     "organic inspection body code"
                     in candidate.lower()
-                    or re.search(
-                        r"\b[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3}\b",
-                        candidate,
-                        re.I,
-                    )
+                    or CONTROL_BODY_PATTERN.search(candidate)
                 ):
                     break
 
             node = node.parent
 
-        if chosen and chosen not in seen:
-            seen.add(chosen)
+        if (
+            chosen
+            and chosen not in regulatory_seen
+        ):
+            regulatory_seen.add(chosen)
 
             add_section(
                 sections,
                 "Regulatory information "
-                + str(number),
+                + str(regulatory_number),
                 chosen,
             )
 
-            number += 1
+            regulatory_number += 1
 
-    raw_normalized = normalize(raw_html)
+    raw_normalised = normalise(raw_html)
 
-    fallback = re.compile(
+    raw_pattern = re.compile(
         r".{0,500}"
         r"(?:organic inspection body code|"
-        r"\b[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3}\b)"
+        r"\b[A-Z]{2,3}[\s-]*BIO"
+        r"[\s-]*\d{2,3}\b)"
         r".{0,900}",
         re.I | re.S,
     )
 
-    for raw_match in fallback.finditer(
-        raw_normalized
+    for raw_match in raw_pattern.finditer(
+        raw_normalised
     ):
-        fragment = raw_match.group(0)
-
-        text = normalize(
+        text = normalise(
             BeautifulSoup(
-                fragment,
+                raw_match.group(0),
                 "html.parser",
             ).get_text(
                 " ",
@@ -243,48 +257,26 @@ def extract_regulatory(
             )
         )
 
-        if text and text not in seen:
-            seen.add(text)
+        if (
+            text
+            and text not in regulatory_seen
+        ):
+            regulatory_seen.add(text)
 
             add_section(
                 sections,
                 "Regulatory source data "
-                + str(number),
+                + str(regulatory_number),
                 text,
             )
 
-            number += 1
-
-
-def parse_page(raw_html):
-    soup = BeautifulSoup(
-        raw_html,
-        "html.parser",
-    )
-
-    sections = {}
-
-    extract_standard_sections(
-        soup,
-        sections,
-    )
-
-    extract_aplus(
-        soup,
-        sections,
-    )
-
-    extract_regulatory(
-        soup,
-        raw_html,
-        sections,
-    )
+            regulatory_number += 1
 
     return sections
 
 
 def make_pattern(term):
-    term = normalize(term)
+    term = normalise(term)
     lower = term.lower()
 
     if not term:
@@ -298,13 +290,17 @@ def make_pattern(term):
 
     if lower == "bio":
         return re.compile(
-            r"(?<![A-Za-z0-9])bio(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])"
+            r"bio"
+            r"(?![A-Za-z0-9])",
             re.I,
         )
 
     if lower == "eco":
         return re.compile(
-            r"(?<![A-Za-z0-9])eco(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])"
+            r"eco"
+            r"(?![A-Za-z0-9])",
             re.I,
         )
 
@@ -332,21 +328,24 @@ def make_pattern(term):
 
 
 def build_search_terms(user_terms):
-    combined = []
+    output = []
     seen = set()
 
     for term in (
         list(user_terms)
-        + BUILT_IN_ORGANIC_TERMS
+        + BUILT_IN_TERMS
     ):
-        term = normalize(term)
+        term = normalise(term)
         key = term.lower()
 
-        if term and key not in seen:
+        if (
+            term
+            and key not in seen
+        ):
             seen.add(key)
-            combined.append(term)
+            output.append(term)
 
-    return combined
+    return output
 
 
 def find_matches(
@@ -371,12 +370,7 @@ def find_matches(
     patterns.append(
         (
             "organic control-body code",
-            re.compile(
-                r"\b[A-Z]{2,3}"
-                r"[\s-]*BIO"
-                r"[\s-]*\d{2,3}\b",
-                re.I,
-            ),
+            CONTROL_BODY_PATTERN,
         )
     )
 
@@ -424,75 +418,163 @@ def find_matches(
     return matches
 
 
-def error_code_for_http(status):
-    if status == 401:
-        return "E110 SCRAPERAPI_KEY_ERROR"
-
-    if status == 403:
-        return "E102 SCRAPERAPI_HTTP_403"
-
-    if status == 429:
-        return "E103 SCRAPERAPI_HTTP_429"
-
-    if 500 <= status <= 599:
-        return (
-            "E104 SCRAPERAPI_HTTP_"
-            + str(status)
-        )
-
-    return (
-        "E120 SCRAPERAPI_HTTP_"
-        + str(status)
-    )
-
-
-def scraper_request(
-    url,
+def result_from_html(
+    asin,
     marketplace,
-    render=False,
+    raw_html,
+    status_code,
+    terms,
 ):
-    country = (
-        "uk"
-        if marketplace == "UK"
-        else marketplace.lower()
-    )
+    url = MARKETPLACES[
+        marketplace
+    ].format(asin)
 
-    params = {
-        "api_key": SCRAPERAPI_KEY,
+    item = {
+        "asin": asin,
         "url": url,
-        "country_code": country,
+        "status": "unknown",
+        "title": "",
+        "matches": [],
+        "warning": None,
+        "error_code": None,
+        "http_status": status_code,
+        "sections_found": [],
     }
 
-    if render:
-        params["render"] = "true"
+    if status_code != 200:
+        item["status"] = (
+            "fetch_failed"
+        )
 
-    timeout = (
-        25
-        if not render
-        else 35
-    )
+        item["error_code"] = (
+            "E220 AMAZON_HTTP_"
+            + str(status_code)
+        )
 
-    return requests.get(
-        SCRAPERAPI_URL,
-        params=params,
-        timeout=timeout,
-    )
+        item["warning"] = (
+            item["error_code"]
+            + ": ScraperAPI finished the job, "
+            "but Amazon returned HTTP "
+            + str(status_code)
+            + "."
+        )
 
+        return item
 
-def page_is_captcha(text):
-    lower = text.lower()
+    lower = raw_html.lower()
 
-    return (
+    if (
         "enter the characters you see below"
         in lower
         or
         "sorry, we just need to make sure you're not a robot"
         in lower
+    ):
+        item["status"] = "blocked"
+
+        item["error_code"] = (
+            "E230 AMAZON_CAPTCHA"
+        )
+
+        item["warning"] = (
+            "E230 AMAZON_CAPTCHA: "
+            "Amazon returned a robot/CAPTCHA page."
+        )
+
+        return item
+
+    sections = extract_sections(
+        raw_html
     )
 
+    item["sections_found"] = (
+        list(
+            sections.keys()
+        )
+    )
 
-@app.post("/api/scan")
-def scan(req: ScanRequest):
+    item["title"] = sections.get(
+        "Title",
+        "",
+    )
+
+    item["matches"] = find_matches(
+        sections,
+        build_search_terms(terms),
+    )
+
+    has_aplus = any(
+        name.startswith("A+")
+        for name in sections
+    )
+
+    has_regulatory = any(
+        name.startswith("Regulatory")
+        for name in sections
+    )
+
+    if item["matches"]:
+        item["status"] = "matched"
+
+    elif not item["title"]:
+        item["status"] = (
+            "incomplete"
+        )
+
+        item["error_code"] = (
+            "E206 AMAZON_DATA_EMPTY"
+        )
+
+        item["warning"] = (
+            "E206 AMAZON_DATA_EMPTY: "
+            "the async job finished, "
+            "but the product title could not be extracted."
+        )
+
+    elif (
+        not has_aplus
+        and not has_regulatory
+    ):
+        item["status"] = (
+            "incomplete"
+        )
+
+        item["error_code"] = (
+            "E207 TARGET_SECTIONS_NOT_RETURNED"
+        )
+
+        item["warning"] = (
+            "E207 TARGET_SECTIONS_NOT_RETURNED: "
+            "the product loaded, but neither "
+            "A+ nor Regulatory Information "
+            "was present in the returned HTML. "
+            "This ASIN is not confirmed clear."
+        )
+
+    elif not has_regulatory:
+        item["status"] = (
+            "incomplete"
+        )
+
+        item["error_code"] = (
+            "E208 REGULATORY_DATA_NOT_RETURNED"
+        )
+
+        item["warning"] = (
+            "E208 REGULATORY_DATA_NOT_RETURNED: "
+            "A+ or other product data was found, "
+            "but Regulatory Information was not present. "
+            "This ASIN is not confirmed clear."
+        )
+
+    else:
+        item["status"] = "clear"
+
+    return item
+
+
+@app.post("/api/scan-start")
+def scan_start(req: StartRequest):
     marketplace = (
         req.marketplace.upper()
     )
@@ -515,14 +597,10 @@ def scan(req: ScanRequest):
     asins = []
 
     for raw in req.asins:
-        asin = re.sub(
-            r"[^A-Z0-9]",
-            "",
-            raw.upper(),
-        )
+        asin = clean_asin(raw)
 
         if (
-            len(asin) == 10
+            asin
             and asin not in asins
         ):
             asins.append(asin)
@@ -533,337 +611,406 @@ def scan(req: ScanRequest):
             detail="E002 NO_VALID_ASINS",
         )
 
-    search_terms = (
-        build_search_terms(
-            req.terms
-        )
-    )
+    jobs = []
 
-    results = []
-
-    for asin in asins[:50]:
-        url = MARKETPLACES[
+    for asin in asins[:20]:
+        target_url = MARKETPLACES[
             marketplace
         ].format(asin)
 
-        item = {
-            "asin": asin,
-            "url": url,
-            "status": "unknown",
-            "title": "",
-            "matches": [],
-            "warning": None,
-            "error_code": None,
-            "http_status": None,
-            "fetch_stage": "raw_html",
-            "sections_found": [],
+        country = (
+            "uk"
+            if marketplace == "UK"
+            else marketplace.lower()
+        )
+
+        payload = {
+            "apiKey": SCRAPERAPI_KEY,
+            "url": target_url,
+            "apiParams": {
+                "country_code": country,
+                "device_type": "mobile",
+                "render": True,
+            },
+            "expectUnsuccessReport": True,
+            "timeoutSec": 180,
+            "meta": {
+                "asin": asin,
+                "marketplace": marketplace,
+            },
         }
 
         try:
-            response = scraper_request(
-                url,
-                marketplace,
-                render=False,
+            response = requests.post(
+                ASYNC_JOBS_URL,
+                json=payload,
+                timeout=15,
             )
-
-            item["http_status"] = (
-                response.status_code
-            )
-
-            if (
-                response.status_code
-                != 200
-            ):
-                code = (
-                    error_code_for_http(
-                        response.status_code
-                    )
-                )
-
-                item["status"] = (
-                    "fetch_failed"
-                )
-
-                item["error_code"] = code
-
-                item["warning"] = (
-                    code
-                    + ": ScraperAPI raw HTML request returned HTTP "
-                    + str(
-                        response.status_code
-                    )
-                    + "."
-                )
-
-                results.append(item)
-                continue
-
-            if page_is_captcha(
-                response.text
-            ):
-                item["status"] = (
-                    "blocked"
-                )
-
-                item["error_code"] = (
-                    "E130 AMAZON_CAPTCHA"
-                )
-
-                item["warning"] = (
-                    "E130 AMAZON_CAPTCHA: "
-                    "Amazon returned a robot/CAPTCHA page."
-                )
-
-                results.append(item)
-                continue
-
-            sections = parse_page(
-                response.text
-            )
-
-            has_regulatory = any(
-                name.startswith(
-                    "Regulatory"
-                )
-                for name in sections
-            )
-
-            has_aplus = any(
-                name.startswith("A+")
-                for name in sections
-            )
-
-            raw_mentions_aplus = (
-                "aplus"
-                in response.text.lower()
-                or
-                "a-plus"
-                in response.text.lower()
-            )
-
-            needs_render_fallback = (
-                not has_regulatory
-                or (
-                    raw_mentions_aplus
-                    and not has_aplus
-                )
-            )
-
-            if needs_render_fallback:
-                try:
-                    rendered = (
-                        scraper_request(
-                            url,
-                            marketplace,
-                            render=True,
-                        )
-                    )
-
-                    if (
-                        rendered.status_code
-                        == 200
-                        and not page_is_captcha(
-                            rendered.text
-                        )
-                    ):
-                        rendered_sections = (
-                            parse_page(
-                                rendered.text
-                            )
-                        )
-
-                        for (
-                            name,
-                            text,
-                        ) in (
-                            rendered_sections.items()
-                        ):
-                            if (
-                                name
-                                not in sections
-                            ):
-                                sections[
-                                    name
-                                ] = text
-
-                        item[
-                            "fetch_stage"
-                        ] = (
-                            "raw_html+"
-                            "render_fallback"
-                        )
-
-                    elif (
-                        rendered.status_code
-                        != 200
-                    ):
-                        item[
-                            "warning"
-                        ] = (
-                            error_code_for_http(
-                                rendered.status_code
-                            )
-                            + ": render fallback returned HTTP "
-                            + str(
-                                rendered.status_code
-                            )
-                            + "."
-                        )
-
-                except requests.Timeout:
-                    item[
-                        "warning"
-                    ] = (
-                        "E101 SCRAPERAPI_TIMEOUT: "
-                        "render fallback timed out; "
-                        "raw HTML result was kept."
-                    )
-
-            item["title"] = (
-                sections.get(
-                    "Title",
-                    "",
-                )
-            )
-
-            item[
-                "sections_found"
-            ] = list(
-                sections.keys()
-            )
-
-            item["matches"] = (
-                find_matches(
-                    sections,
-                    search_terms,
-                )
-            )
-
-            has_regulatory = any(
-                name.startswith(
-                    "Regulatory"
-                )
-                for name in sections
-            )
-
-            if item["matches"]:
-                item["status"] = (
-                    "matched"
-                )
-
-            elif not item["title"]:
-                item["status"] = (
-                    "incomplete"
-                )
-
-                item["error_code"] = (
-                    "E106 AMAZON_DATA_EMPTY"
-                )
-
-                item["warning"] = (
-                    "E106 AMAZON_DATA_EMPTY: "
-                    "Amazon HTML was returned, "
-                    "but the product title could not be extracted."
-                )
-
-            elif not has_regulatory:
-                item["status"] = (
-                    "incomplete"
-                )
-
-                item["error_code"] = (
-                    "E108 REGULATORY_DATA_NOT_RETURNED"
-                )
-
-                if not item["warning"]:
-                    item["warning"] = (
-                        "E108 REGULATORY_DATA_NOT_RETURNED: "
-                        "product content was retrieved, "
-                        "but Amazon Regulatory Information "
-                        "was not exposed in the raw HTML "
-                        "or render fallback. "
-                        "This ASIN is not confirmed clear."
-                    )
-
-            else:
-                item["status"] = (
-                    "clear"
-                )
-
-            results.append(item)
 
         except requests.Timeout:
-            item["status"] = (
-                "fetch_failed"
+            jobs.append(
+                {
+                    "asin": asin,
+                    "status": "submit_failed",
+                    "error_code": (
+                        "E201 ASYNC_SUBMIT_TIMEOUT"
+                    ),
+                    "warning": (
+                        "E201 ASYNC_SUBMIT_TIMEOUT: "
+                        "ScraperAPI did not accept "
+                        "the job within 15 seconds."
+                    ),
+                }
             )
 
-            item["error_code"] = (
-                "E101 SCRAPERAPI_TIMEOUT"
-            )
-
-            item["warning"] = (
-                "E101 SCRAPERAPI_TIMEOUT: "
-                "ScraperAPI did not return "
-                "the Amazon page before the request timeout."
-            )
-
-            results.append(item)
-
-        except requests.ConnectionError as error:
-            item["status"] = (
-                "fetch_failed"
-            )
-
-            item["error_code"] = (
-                "E109 UPSTREAM_CONNECTION_ERROR"
-            )
-
-            item["warning"] = (
-                "E109 UPSTREAM_CONNECTION_ERROR: "
-                + str(error)
-            )
-
-            results.append(item)
+            continue
 
         except requests.RequestException as error:
-            item["status"] = (
-                "fetch_failed"
+            jobs.append(
+                {
+                    "asin": asin,
+                    "status": "submit_failed",
+                    "error_code": (
+                        "E202 ASYNC_SUBMIT_ERROR"
+                    ),
+                    "warning": (
+                        "E202 ASYNC_SUBMIT_ERROR: "
+                        + str(error)
+                    ),
+                }
             )
 
-            item["error_code"] = (
-                "E111 SCRAPERAPI_REQUEST_ERROR"
+            continue
+
+        if response.status_code not in (
+            200,
+            201,
+            202,
+        ):
+            jobs.append(
+                {
+                    "asin": asin,
+                    "status": "submit_failed",
+                    "error_code": (
+                        "E203 ASYNC_SUBMIT_HTTP_"
+                        + str(
+                            response.status_code
+                        )
+                    ),
+                    "warning": (
+                        "E203 ASYNC_SUBMIT_HTTP_"
+                        + str(
+                            response.status_code
+                        )
+                        + ": ScraperAPI rejected "
+                        "the async job."
+                    ),
+                }
             )
 
-            item["warning"] = (
-                "E111 SCRAPERAPI_REQUEST_ERROR: "
-                + str(error)
+            continue
+
+        try:
+            data = response.json()
+
+        except ValueError:
+            jobs.append(
+                {
+                    "asin": asin,
+                    "status": "submit_failed",
+                    "error_code": (
+                        "E204 ASYNC_SUBMIT_INVALID_JSON"
+                    ),
+                    "warning": (
+                        "E204 ASYNC_SUBMIT_INVALID_JSON: "
+                        "ScraperAPI returned an invalid job response."
+                    ),
+                }
             )
 
-            results.append(item)
+            continue
 
-        except Exception as error:
-            item["status"] = (
-                "fetch_failed"
+        job_id = str(
+            data.get("id")
+            or ""
+        ).strip()
+
+        status_url = str(
+            data.get("statusUrl")
+            or ""
+        ).strip()
+
+        if not job_id:
+            jobs.append(
+                {
+                    "asin": asin,
+                    "status": "submit_failed",
+                    "error_code": (
+                        "E205 ASYNC_JOB_ID_MISSING"
+                    ),
+                    "warning": (
+                        "E205 ASYNC_JOB_ID_MISSING: "
+                        "ScraperAPI accepted the request "
+                        "but returned no job ID."
+                    ),
+                }
             )
 
-            item["error_code"] = (
-                "E199 APP_PROCESSING_ERROR"
-            )
+            continue
 
-            item["warning"] = (
-                "E199 APP_PROCESSING_ERROR: "
-                + type(error).__name__
-                + ": "
-                + str(error)
-            )
-
-            results.append(item)
+        jobs.append(
+            {
+                "asin": asin,
+                "status": "submitted",
+                "job_id": job_id,
+                "status_url": status_url,
+                "marketplace": marketplace,
+                "terms": req.terms,
+            }
+        )
 
     return {
         "marketplace": marketplace,
-        "count": len(results),
-        "results": results,
+        "count": len(jobs),
+        "jobs": jobs,
     }
+
+
+@app.post("/api/scan-status")
+def scan_status(req: StatusRequest):
+    marketplace = (
+        req.marketplace.upper()
+    )
+
+    asin = clean_asin(
+        req.asin
+    )
+
+    job_id = re.sub(
+        r"[^A-Za-z0-9\-]",
+        "",
+        req.job_id,
+    )
+
+    if marketplace not in MARKETPLACES:
+        raise HTTPException(
+            status_code=400,
+            detail="E001 UNSUPPORTED_MARKETPLACE",
+        )
+
+    if not asin:
+        raise HTTPException(
+            status_code=400,
+            detail="E002 INVALID_ASIN",
+        )
+
+    if not job_id:
+        raise HTTPException(
+            status_code=400,
+            detail="E209 INVALID_JOB_ID",
+        )
+
+    status_url = (
+        ASYNC_JOBS_URL
+        + "/"
+        + job_id
+    )
+
+    try:
+        response = requests.get(
+            status_url,
+            timeout=12,
+        )
+
+    except requests.Timeout:
+        return {
+            "asin": asin,
+            "status": "poll_error",
+            "error_code": (
+                "E210 ASYNC_STATUS_TIMEOUT"
+            ),
+            "warning": (
+                "E210 ASYNC_STATUS_TIMEOUT: "
+                "the job status check timed out. "
+                "The job may still be running."
+            ),
+        }
+
+    except requests.RequestException as error:
+        return {
+            "asin": asin,
+            "status": "poll_error",
+            "error_code": (
+                "E211 ASYNC_STATUS_ERROR"
+            ),
+            "warning": (
+                "E211 ASYNC_STATUS_ERROR: "
+                + str(error)
+            ),
+        }
+
+    if response.status_code != 200:
+        return {
+            "asin": asin,
+            "status": "poll_error",
+            "error_code": (
+                "E212 ASYNC_STATUS_HTTP_"
+                + str(
+                    response.status_code
+                )
+            ),
+            "warning": (
+                "E212 ASYNC_STATUS_HTTP_"
+                + str(
+                    response.status_code
+                )
+                + ": ScraperAPI status endpoint "
+                "returned HTTP "
+                + str(
+                    response.status_code
+                )
+                + "."
+            ),
+        }
+
+    try:
+        data = response.json()
+
+    except ValueError:
+        return {
+            "asin": asin,
+            "status": "poll_error",
+            "error_code": (
+                "E213 ASYNC_STATUS_INVALID_JSON"
+            ),
+            "warning": (
+                "E213 ASYNC_STATUS_INVALID_JSON: "
+                "invalid status response from ScraperAPI."
+            ),
+        }
+
+    job_status = str(
+        data.get("status")
+        or ""
+    ).lower()
+
+    if job_status in (
+        "pending",
+        "running",
+        "processing",
+        "queued",
+        "created",
+    ):
+        return {
+            "asin": asin,
+            "status": "scanning",
+            "job_status": job_status,
+            "attempts": data.get(
+                "attempts"
+            ),
+        }
+
+    if job_status == "failed":
+        reason = str(
+            data.get("failReason")
+            or "unknown_failure"
+        )
+
+        return {
+            "asin": asin,
+            "status": "fetch_failed",
+            "error_code": (
+                "E214 ASYNC_JOB_FAILED"
+            ),
+            "warning": (
+                "E214 ASYNC_JOB_FAILED: "
+                + reason
+            ),
+            "job_status": job_status,
+            "attempts": data.get(
+                "attempts"
+            ),
+        }
+
+    if job_status != "finished":
+        return {
+            "asin": asin,
+            "status": "poll_error",
+            "error_code": (
+                "E215 UNKNOWN_ASYNC_STATUS"
+            ),
+            "warning": (
+                "E215 UNKNOWN_ASYNC_STATUS: "
+                "ScraperAPI returned job status '"
+                + job_status
+                + "'."
+            ),
+        }
+
+    scraper_response = (
+        data.get("response")
+        or {}
+    )
+
+    body = (
+        scraper_response.get("body")
+        or ""
+    )
+
+    amazon_status = (
+        scraper_response.get(
+            "statusCode"
+        )
+    )
+
+    if amazon_status is None:
+        amazon_status = 0
+
+    if (
+        not isinstance(
+            body,
+            str,
+        )
+        or not body.strip()
+    ):
+        return {
+            "asin": asin,
+            "status": "incomplete",
+            "error_code": (
+                "E216 ASYNC_BODY_EMPTY"
+            ),
+            "warning": (
+                "E216 ASYNC_BODY_EMPTY: "
+                "the job finished but no "
+                "Amazon HTML body was returned."
+            ),
+            "job_status": job_status,
+            "attempts": data.get(
+                "attempts"
+            ),
+        }
+
+    result = result_from_html(
+        asin=asin,
+        marketplace=marketplace,
+        raw_html=body,
+        status_code=int(
+            amazon_status
+        ),
+        terms=req.terms,
+    )
+
+    result["job_status"] = (
+        job_status
+    )
+
+    result["attempts"] = (
+        data.get("attempts")
+    )
+
+    result["job_id"] = job_id
+
+    return result
 
 
 @app.get("/")
