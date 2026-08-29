@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List
 from uuid import uuid4
 import html as html_lib
+import logging
 import os
 import re
 import threading
@@ -12,6 +13,12 @@ import requests
 from bs4 import BeautifulSoup
 
 app = FastAPI(title="Amazon Live Listing Scanner")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("listing-scanner")
 
 MARKETPLACES = {
     "UK": {"url": "https://www.amazon.co.uk/dp/{}", "country": "uk"},
@@ -76,49 +83,31 @@ def clean_asin(raw):
         "",
         str(raw).upper(),
     )
-
     return asin if len(asin) == 10 else ""
 
 
-def add_section(
-    sections,
-    name,
-    text,
-):
+def add_section(sections, name, text):
     text = normalise(text)
 
-    if (
-        text
-        and text not in sections.values()
-    ):
+    if text and text not in sections.values():
         sections[name] = text
 
 
 def extract_sections(raw_html):
-    soup = BeautifulSoup(
-        raw_html,
-        "html.parser",
-    )
-
+    soup = BeautifulSoup(raw_html, "html.parser")
     sections = {}
 
-    title = soup.select_one(
-        "#productTitle"
-    )
+    title = soup.select_one("#productTitle")
 
     if title:
         add_section(
             sections,
             "Title",
-            title.get_text(
-                " ",
-                strip=True,
-            ),
+            title.get_text(" ", strip=True),
         )
 
     bullets = soup.select(
-        "#feature-bullets "
-        "li span.a-list-item"
+        "#feature-bullets li span.a-list-item"
     )
 
     if bullets:
@@ -126,89 +115,43 @@ def extract_sections(raw_html):
             sections,
             "Bullet points",
             " | ".join(
-                x.get_text(
-                    " ",
-                    strip=True,
-                )
+                x.get_text(" ", strip=True)
                 for x in bullets
             ),
         )
 
     selectors = [
-        (
-            "Product overview",
-            "#productOverview_feature_div",
-        ),
-        (
-            "Description",
-            "#productDescription",
-        ),
-        (
-            "Product details",
-            "#detailBullets_feature_div",
-        ),
-        (
-            "Product details 2",
-            "#productDetails_feature_div",
-        ),
-        (
-            "Product details 3",
-            "#productDetails_techSpec_section_1",
-        ),
-        (
-            "Product details 4",
-            "#productDetails_detailBullets_sections1",
-        ),
-        (
-            "Important information",
-            "#important-information",
-        ),
-        (
-            "Important information 2",
-            "#importantInformation",
-        ),
-        (
-            "Safety information",
-            "#safety-information",
-        ),
-        (
-            "Ingredients",
-            "#ingredients",
-        ),
-        (
-            "Directions",
-            "#directions",
-        ),
+        ("Product overview", "#productOverview_feature_div"),
+        ("Description", "#productDescription"),
+        ("Product details", "#detailBullets_feature_div"),
+        ("Product details 2", "#productDetails_feature_div"),
+        ("Product details 3", "#productDetails_techSpec_section_1"),
+        ("Product details 4", "#productDetails_detailBullets_sections1"),
+        ("Important information", "#important-information"),
+        ("Important information 2", "#importantInformation"),
+        ("Safety information", "#safety-information"),
+        ("Ingredients", "#ingredients"),
+        ("Directions", "#directions"),
     ]
 
     for name, selector in selectors:
-        node = soup.select_one(
-            selector
-        )
+        node = soup.select_one(selector)
 
         if node:
             add_section(
                 sections,
                 name,
-                node.get_text(
-                    " ",
-                    strip=True,
-                ),
+                node.get_text(" ", strip=True),
             )
 
     aplus = (
-        soup.select_one(
-            "#aplus_feature_div"
-        )
-        or soup.select_one(
-            "#aplus"
-        )
+        soup.select_one("#aplus_feature_div")
+        or soup.select_one("#aplus")
     )
 
     if aplus:
         modules = aplus.select(
-            ".aplus-module, "
-            ".premium-aplus-module"
+            ".aplus-module, .premium-aplus-module"
         )
 
         seen_modules = set()
@@ -216,26 +159,17 @@ def extract_sections(raw_html):
 
         for module in modules:
             text = normalise(
-                module.get_text(
-                    " ",
-                    strip=True,
-                )
+                module.get_text(" ", strip=True)
             )
 
-            if (
-                len(text) < 20
-                or text in seen_modules
-            ):
+            if len(text) < 20 or text in seen_modules:
                 continue
 
-            seen_modules.add(
-                text
-            )
+            seen_modules.add(text)
 
             add_section(
                 sections,
-                "A+ module "
-                + str(module_number),
+                f"A+ module {module_number}",
                 text,
             )
 
@@ -244,29 +178,22 @@ def extract_sections(raw_html):
         add_section(
             sections,
             "A+ full content",
-            aplus.get_text(
-                " ",
-                strip=True,
-            ),
+            aplus.get_text(" ", strip=True),
         )
 
     regulatory_marker = re.compile(
         r"organic inspection body code|"
         r"regulatory information|"
         r"safety and product resources|"
-        r"\b[A-Z]{2,3}"
-        r"[\s\-–—−‐-]*BIO"
-        r"[\s\-–—−‐-]*"
-        r"\d{2,3}\b",
+        r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO"
+        r"[\s\-–—−‐-]*\d{2,3}\b",
         re.I,
     )
 
     regulatory_seen = set()
     regulatory_number = 1
 
-    for text_node in soup.find_all(
-        string=regulatory_marker
-    ):
+    for text_node in soup.find_all(string=regulatory_marker):
         node = text_node.parent
         chosen = ""
 
@@ -275,93 +202,59 @@ def extract_sections(raw_html):
                 break
 
             candidate = normalise(
-                node.get_text(
-                    " ",
-                    strip=True,
-                )
+                node.get_text(" ", strip=True)
             )
 
             if (
                 20 <= len(candidate) <= 3000
-                and regulatory_marker.search(
-                    candidate
-                )
+                and regulatory_marker.search(candidate)
             ):
                 chosen = candidate
 
                 if (
                     "organic inspection body code"
                     in candidate.lower()
-                    or CONTROL_BODY_PATTERN.search(
-                        candidate
-                    )
+                    or CONTROL_BODY_PATTERN.search(candidate)
                 ):
                     break
 
             node = node.parent
 
-        if (
-            chosen
-            and chosen
-            not in regulatory_seen
-        ):
-            regulatory_seen.add(
-                chosen
-            )
+        if chosen and chosen not in regulatory_seen:
+            regulatory_seen.add(chosen)
 
             add_section(
                 sections,
-                "Regulatory information "
-                + str(
-                    regulatory_number
-                ),
+                f"Regulatory information {regulatory_number}",
                 chosen,
             )
 
             regulatory_number += 1
 
-    raw_normalised = normalise(
-        raw_html
-    )
+    raw_normalised = normalise(raw_html)
 
     raw_pattern = re.compile(
         r".{0,500}"
         r"(?:organic inspection body code|"
-        r"\b[A-Z]{2,3}"
-        r"[\s-]*BIO"
-        r"[\s-]*\d{2,3}\b)"
+        r"\b[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3}\b)"
         r".{0,900}",
         re.I | re.S,
     )
 
-    for raw_match in raw_pattern.finditer(
-        raw_normalised
-    ):
+    for raw_match in raw_pattern.finditer(raw_normalised):
         text = normalise(
             BeautifulSoup(
                 raw_match.group(0),
                 "html.parser",
-            ).get_text(
-                " ",
-                strip=True,
-            )
+            ).get_text(" ", strip=True)
         )
 
-        if (
-            text
-            and text
-            not in regulatory_seen
-        ):
-            regulatory_seen.add(
-                text
-            )
+        if text and text not in regulatory_seen:
+            regulatory_seen.add(text)
 
             add_section(
                 sections,
-                "Regulatory source data "
-                + str(
-                    regulatory_number
-                ),
+                f"Regulatory source data {regulatory_number}",
                 text,
             )
 
@@ -385,17 +278,13 @@ def make_pattern(term):
 
     if lower == "bio":
         return re.compile(
-            r"(?<![A-Za-z0-9])"
-            r"bio"
-            r"(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])bio(?![A-Za-z0-9])",
             re.I,
         )
 
     if lower == "eco":
         return re.compile(
-            r"(?<![A-Za-z0-9])"
-            r"eco"
-            r"(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])eco(?![A-Za-z0-9])",
             re.I,
         )
 
@@ -405,10 +294,7 @@ def make_pattern(term):
             re.I,
         )
 
-    if re.fullmatch(
-        r"[A-Za-z0-9]+",
-        term,
-    ):
+    if re.fullmatch(r"[A-Za-z0-9]+", term):
         return re.compile(
             r"(?<![A-Za-z0-9])"
             + re.escape(term)
@@ -416,78 +302,47 @@ def make_pattern(term):
             re.I,
         )
 
-    return re.compile(
-        re.escape(term),
-        re.I,
-    )
+    return re.compile(re.escape(term), re.I)
 
 
-def build_search_terms(
-    user_terms
-):
+def build_search_terms(user_terms):
     output = []
     seen = set()
 
-    for term in (
-        list(user_terms)
-        + BUILT_IN_TERMS
-    ):
+    for term in list(user_terms) + BUILT_IN_TERMS:
         term = normalise(term)
         key = term.lower()
 
-        if (
-            term
-            and key not in seen
-        ):
+        if term and key not in seen:
             seen.add(key)
             output.append(term)
 
     return output
 
 
-def find_matches(
-    sections,
-    terms,
-):
+def find_matches(sections, terms):
     matches = []
     seen = set()
     patterns = []
 
     for term in terms:
-        pattern = make_pattern(
-            term
-        )
+        pattern = make_pattern(term)
 
         if pattern is not None:
-            patterns.append(
-                (
-                    term,
-                    pattern,
-                )
-            )
+            patterns.append((term, pattern))
 
     patterns.append(
-        (
-            "organic control-body code",
-            CONTROL_BODY_PATTERN,
-        )
+        ("organic control-body code", CONTROL_BODY_PATTERN)
     )
 
     for section, text in sections.items():
         for label, pattern in patterns:
-            found = list(
-                pattern.finditer(
-                    text
-                )
-            )
+            found = list(pattern.finditer(text))
 
             if not found:
                 continue
 
-            key = (
-                section,
-                label.lower(),
-            )
+            key = (section, label.lower())
 
             if key in seen:
                 continue
@@ -495,49 +350,30 @@ def find_matches(
             seen.add(key)
 
             first = found[0]
-
-            left = max(
-                0,
-                first.start() - 180,
-            )
-
-            right = min(
-                len(text),
-                first.end() + 320,
-            )
+            left = max(0, first.start() - 180)
+            right = min(len(text), first.end() + 320)
 
             matches.append(
                 {
                     "term": label,
                     "section": section,
-                    "snippet": (
-                        text[left:right]
-                    ),
+                    "snippet": text[left:right],
                     "full_text": text,
-                    "occurrences": (
-                        len(found)
-                    ),
+                    "occurrences": len(found),
                 }
             )
 
     return matches
 
 
-def result_from_payload(
-    meta,
-    payload,
-):
+def result_from_payload(meta, payload):
     asin = meta["asin"]
-    marketplace = meta[
-        "marketplace"
-    ]
+    marketplace = meta["marketplace"]
     terms = meta["terms"]
 
     item = {
         "asin": asin,
-        "url": MARKETPLACES[
-            marketplace
-        ]["url"].format(asin),
+        "url": MARKETPLACES[marketplace]["url"].format(asin),
         "status": "unknown",
         "title": "",
         "matches": [],
@@ -545,9 +381,7 @@ def result_from_payload(
         "error_code": None,
         "http_status": None,
         "sections_found": [],
-        "attempts": payload.get(
-            "attempts"
-        ),
+        "attempts": payload.get("attempts"),
     }
 
     job_status = str(
@@ -557,20 +391,12 @@ def result_from_payload(
 
     if job_status == "failed":
         reason = str(
-            payload.get(
-                "failReason"
-            )
+            payload.get("failReason")
             or "unknown_failure"
         )
 
-        item["status"] = (
-            "fetch_failed"
-        )
-
-        item["error_code"] = (
-            "E214 ASYNC_JOB_FAILED"
-        )
-
+        item["status"] = "fetch_failed"
+        item["error_code"] = "E214 ASYNC_JOB_FAILED"
         item["warning"] = (
             "E214 ASYNC_JOB_FAILED: "
             + reason
@@ -578,78 +404,38 @@ def result_from_payload(
 
         return item
 
-    response_data = (
-        payload.get("response")
-        or {}
-    )
-
-    body = (
-        response_data.get("body")
-        or ""
-    )
-
-    amazon_status = (
-        response_data.get(
-            "statusCode"
-        )
-    )
+    response_data = payload.get("response") or {}
+    body = response_data.get("body") or ""
+    amazon_status = response_data.get("statusCode")
 
     try:
-        amazon_status = int(
-            amazon_status
-        )
+        amazon_status = int(amazon_status)
 
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         amazon_status = 0
 
-    item["http_status"] = (
-        amazon_status
-    )
+    item["http_status"] = amazon_status
 
-    if (
-        not isinstance(
-            body,
-            str,
-        )
-        or not body.strip()
-    ):
-        item["status"] = (
-            "incomplete"
-        )
-
-        item["error_code"] = (
-            "E216 ASYNC_BODY_EMPTY"
-        )
-
+    if not isinstance(body, str) or not body.strip():
+        item["status"] = "incomplete"
+        item["error_code"] = "E216 ASYNC_BODY_EMPTY"
         item["warning"] = (
             "E216 ASYNC_BODY_EMPTY: "
-            "the async job completed "
-            "but no Amazon HTML body "
-            "was returned."
+            "the async job completed but no "
+            "Amazon HTML body was returned."
         )
 
         return item
 
     if amazon_status != 200:
-        item["status"] = (
-            "fetch_failed"
-        )
-
+        item["status"] = "fetch_failed"
         item["error_code"] = (
-            "E220 AMAZON_HTTP_"
-            + str(amazon_status)
+            f"E220 AMAZON_HTTP_{amazon_status}"
         )
-
         item["warning"] = (
-            item["error_code"]
-            + ": ScraperAPI completed "
-            "the job, but Amazon "
-            "returned HTTP "
-            + str(amazon_status)
-            + "."
+            f"{item['error_code']}: "
+            f"ScraperAPI completed the job, "
+            f"but Amazon returned HTTP {amazon_status}."
         )
 
         return item
@@ -657,51 +443,27 @@ def result_from_payload(
     lower = body.lower()
 
     if (
-        "enter the characters "
-        "you see below"
-        in lower
+        "enter the characters you see below" in lower
         or
-        "sorry, we just need "
-        "to make sure you're "
-        "not a robot"
+        "sorry, we just need to make sure you're not a robot"
         in lower
     ):
-        item["status"] = (
-            "blocked"
-        )
-
-        item["error_code"] = (
-            "E230 AMAZON_CAPTCHA"
-        )
-
+        item["status"] = "blocked"
+        item["error_code"] = "E230 AMAZON_CAPTCHA"
         item["warning"] = (
             "E230 AMAZON_CAPTCHA: "
-            "Amazon returned a "
-            "robot/CAPTCHA page."
+            "Amazon returned a robot/CAPTCHA page."
         )
 
         return item
 
-    sections = extract_sections(
-        body
-    )
+    sections = extract_sections(body)
 
-    item["sections_found"] = (
-        list(
-            sections.keys()
-        )
-    )
-
-    item["title"] = sections.get(
-        "Title",
-        "",
-    )
-
+    item["sections_found"] = list(sections.keys())
+    item["title"] = sections.get("Title", "")
     item["matches"] = find_matches(
         sections,
-        build_search_terms(
-            terms
-        ),
+        build_search_terms(terms),
     )
 
     has_aplus = any(
@@ -710,198 +472,124 @@ def result_from_payload(
     )
 
     has_regulatory = any(
-        name.startswith(
-            "Regulatory"
-        )
+        name.startswith("Regulatory")
         for name in sections
     )
 
     if item["matches"]:
-        item["status"] = (
-            "matched"
-        )
+        item["status"] = "matched"
 
     elif not item["title"]:
-        item["status"] = (
-            "incomplete"
-        )
-
-        item["error_code"] = (
-            "E206 AMAZON_DATA_EMPTY"
-        )
-
+        item["status"] = "incomplete"
+        item["error_code"] = "E206 AMAZON_DATA_EMPTY"
         item["warning"] = (
             "E206 AMAZON_DATA_EMPTY: "
-            "the job completed, but "
-            "the product title could "
-            "not be extracted."
+            "the job completed, but the product "
+            "title could not be extracted."
         )
 
-    elif (
-        not has_aplus
-        and not has_regulatory
-    ):
-        item["status"] = (
-            "incomplete"
-        )
-
+    elif not has_aplus and not has_regulatory:
+        item["status"] = "incomplete"
         item["error_code"] = (
-            "E207 "
-            "TARGET_SECTIONS_NOT_RETURNED"
+            "E207 TARGET_SECTIONS_NOT_RETURNED"
         )
-
         item["warning"] = (
-            "E207 "
-            "TARGET_SECTIONS_NOT_RETURNED: "
-            "neither A+ nor Regulatory "
-            "Information was present "
-            "in the returned HTML. "
-            "This ASIN is not "
-            "confirmed clear."
+            "E207 TARGET_SECTIONS_NOT_RETURNED: "
+            "neither A+ nor Regulatory Information "
+            "was present in the returned HTML. "
+            "This ASIN is not confirmed clear."
         )
 
     elif not has_regulatory:
-        item["status"] = (
-            "incomplete"
-        )
-
+        item["status"] = "incomplete"
         item["error_code"] = (
-            "E208 "
-            "REGULATORY_DATA_NOT_RETURNED"
+            "E208 REGULATORY_DATA_NOT_RETURNED"
         )
-
         item["warning"] = (
-            "E208 "
-            "REGULATORY_DATA_NOT_RETURNED: "
-            "A+ or other product data "
-            "was found, but Regulatory "
-            "Information was not present. "
-            "This ASIN is not "
-            "confirmed clear."
+            "E208 REGULATORY_DATA_NOT_RETURNED: "
+            "A+ or other product data was found, "
+            "but Regulatory Information was not present. "
+            "This ASIN is not confirmed clear."
         )
 
     else:
-        item["status"] = (
-            "clear"
-        )
+        item["status"] = "clear"
 
     return item
 
 
 def cleanup_old_state():
-    cutoff = (
-        time.time()
-        - STATE_TTL_SECONDS
-    )
+    cutoff = time.time() - STATE_TTL_SECONDS
 
     with STATE_LOCK:
         stale = [
             token
-            for token, value
-            in SCAN_STATE.items()
-            if value.get(
-                "created_at",
-                0,
-            ) < cutoff
+            for token, value in SCAN_STATE.items()
+            if value.get("created_at", 0) < cutoff
         ]
 
         for token in stale:
-            SCAN_STATE.pop(
-                token,
-                None,
-            )
+            SCAN_STATE.pop(token, None)
 
 
-def finish_state(
-    token,
-    result,
-):
+def finish_state(token, result):
     with STATE_LOCK:
         if token in SCAN_STATE:
-            SCAN_STATE[
-                token
-            ]["status"] = (
-                "finished"
-            )
+            SCAN_STATE[token]["status"] = "finished"
+            SCAN_STATE[token]["result"] = result
 
-            SCAN_STATE[
-                token
-            ]["result"] = (
-                result
-            )
+    logger.info(
+        "SCAN_FINISHED token=%s asin=%s status=%s error=%s",
+        token[:8],
+        result.get("asin", ""),
+        result.get("status", ""),
+        result.get("error_code", ""),
+    )
 
 
-def background_run_job(
-    token
-):
-    """
-    Submit and poll a ScraperAPI
-    job entirely in the background.
-
-    Browser-facing endpoints never
-    wait on ScraperAPI network calls.
-    """
-
+def background_run_job(token):
     with STATE_LOCK:
-        state = SCAN_STATE.get(
-            token
-        )
+        state = SCAN_STATE.get(token)
 
         if state is None:
+            logger.warning(
+                "BACKGROUND_ABORT token=%s reason=state_missing",
+                token[:8],
+            )
             return
 
-        state_copy = dict(
-            state
-        )
+        state_copy = dict(state)
 
-    asin = state_copy.get(
-        "asin",
-        "",
-    )
-
-    marketplace = state_copy.get(
-        "marketplace",
-        "UK",
-    )
+    asin = state_copy.get("asin", "")
+    marketplace = state_copy.get("marketplace", "UK")
 
     target_url = (
-        MARKETPLACES[
-            marketplace
-        ]["url"].format(
-            asin
-        )
+        MARKETPLACES[marketplace]["url"].format(asin)
     )
 
     payload = {
-        "apiKey": (
-            SCRAPERAPI_KEY
-        ),
-        "url": (
-            target_url
-        ),
+        "apiKey": SCRAPERAPI_KEY,
+        "url": target_url,
         "apiParams": {
-            "country_code": (
-                MARKETPLACES[
-                    marketplace
-                ]["country"]
-            ),
-            "device_type": (
-                "mobile"
-            ),
+            "country_code": MARKETPLACES[marketplace]["country"],
+            "device_type": "mobile",
             "render": True,
         },
-        "expectUnsuccessReport": (
-            True
-        ),
+        "expectUnsuccessReport": True,
         "timeoutSec": 600,
         "meta": {
             "token": token,
             "asin": asin,
-            "marketplace": (
-                marketplace
-            ),
+            "marketplace": marketplace,
         },
     }
+
+    logger.info(
+        "ASYNC_SUBMIT_START token=%s asin=%s marketplace=%s",
+        token[:8],
+        asin,
+        marketplace,
+    )
 
     try:
         response = requests.post(
@@ -911,22 +599,21 @@ def background_run_job(
         )
 
     except requests.Timeout:
+        logger.error(
+            "ASYNC_SUBMIT_TIMEOUT token=%s asin=%s",
+            token[:8],
+            asin,
+        )
+
         finish_state(
             token,
             {
                 "asin": asin,
-                "status": (
-                    "submit_failed"
-                ),
-                "error_code": (
-                    "E201 "
-                    "ASYNC_SUBMIT_TIMEOUT"
-                ),
+                "status": "submit_failed",
+                "error_code": "E201 ASYNC_SUBMIT_TIMEOUT",
                 "warning": (
-                    "E201 "
-                    "ASYNC_SUBMIT_TIMEOUT: "
-                    "ScraperAPI did not "
-                    "accept the background "
+                    "E201 ASYNC_SUBMIT_TIMEOUT: "
+                    "ScraperAPI did not accept the background "
                     "job quickly enough."
                 ),
             },
@@ -935,20 +622,21 @@ def background_run_job(
         return
 
     except requests.RequestException as error:
+        logger.exception(
+            "ASYNC_SUBMIT_ERROR token=%s asin=%s error=%s",
+            token[:8],
+            asin,
+            error,
+        )
+
         finish_state(
             token,
             {
                 "asin": asin,
-                "status": (
-                    "submit_failed"
-                ),
-                "error_code": (
-                    "E202 "
-                    "ASYNC_SUBMIT_ERROR"
-                ),
+                "status": "submit_failed",
+                "error_code": "E202 ASYNC_SUBMIT_ERROR",
                 "warning": (
-                    "E202 "
-                    "ASYNC_SUBMIT_ERROR: "
+                    "E202 ASYNC_SUBMIT_ERROR: "
                     + str(error)
                 ),
             },
@@ -956,36 +644,35 @@ def background_run_job(
 
         return
 
-    if (
-        response.status_code
-        not in (
-            200,
-            201,
-            202,
+    logger.info(
+        "ASYNC_SUBMIT_HTTP token=%s asin=%s http=%s",
+        token[:8],
+        asin,
+        response.status_code,
+    )
+
+    if response.status_code not in (200, 201, 202):
+        logger.error(
+            "ASYNC_SUBMIT_REJECTED token=%s asin=%s http=%s body=%s",
+            token[:8],
+            asin,
+            response.status_code,
+            response.text[:500],
         )
-    ):
+
         finish_state(
             token,
             {
                 "asin": asin,
-                "status": (
-                    "submit_failed"
-                ),
+                "status": "submit_failed",
                 "error_code": (
-                    "E203 "
-                    "ASYNC_SUBMIT_HTTP_"
-                    + str(
-                        response.status_code
-                    )
+                    f"E203 ASYNC_SUBMIT_HTTP_"
+                    f"{response.status_code}"
                 ),
                 "warning": (
-                    "E203 "
-                    "ASYNC_SUBMIT_HTTP_"
-                    + str(
-                        response.status_code
-                    )
-                    + ": ScraperAPI "
-                    "rejected the async job."
+                    f"E203 ASYNC_SUBMIT_HTTP_"
+                    f"{response.status_code}: "
+                    f"ScraperAPI rejected the async job."
                 ),
             },
         )
@@ -996,6 +683,12 @@ def background_run_job(
         data = response.json()
 
     except ValueError:
+        logger.error(
+            "ASYNC_SUBMIT_INVALID_JSON token=%s asin=%s body=%s",
+            token[:8],
+            asin,
+            response.text[:500],
+        )
         data = {}
 
     job_id = str(
@@ -1009,23 +702,23 @@ def background_run_job(
     ).strip()
 
     if not job_id:
+        logger.error(
+            "ASYNC_JOB_ID_MISSING token=%s asin=%s response=%s",
+            token[:8],
+            asin,
+            str(data)[:500],
+        )
+
         finish_state(
             token,
             {
                 "asin": asin,
-                "status": (
-                    "submit_failed"
-                ),
-                "error_code": (
-                    "E205 "
-                    "ASYNC_JOB_ID_MISSING"
-                ),
+                "status": "submit_failed",
+                "error_code": "E205 ASYNC_JOB_ID_MISSING",
                 "warning": (
-                    "E205 "
-                    "ASYNC_JOB_ID_MISSING: "
-                    "ScraperAPI accepted "
-                    "the request but returned "
-                    "no job ID."
+                    "E205 ASYNC_JOB_ID_MISSING: "
+                    "ScraperAPI accepted the request "
+                    "but returned no job ID."
                 ),
             },
         )
@@ -1041,51 +734,50 @@ def background_run_job(
 
     with STATE_LOCK:
         if token not in SCAN_STATE:
+            logger.warning(
+                "ASYNC_JOB_STATE_GONE token=%s asin=%s job_id=%s",
+                token[:8],
+                asin,
+                job_id,
+            )
             return
 
-        SCAN_STATE[
-            token
-        ]["status"] = (
-            "scanning"
-        )
+        SCAN_STATE[token]["status"] = "scanning"
+        SCAN_STATE[token]["job_id"] = job_id
+        SCAN_STATE[token]["status_url"] = status_url
+        SCAN_STATE[token]["remote_status"] = "submitted"
 
-        SCAN_STATE[
-            token
-        ]["job_id"] = (
-            job_id
-        )
-
-        SCAN_STATE[
-            token
-        ]["status_url"] = (
-            status_url
-        )
+    logger.info(
+        "ASYNC_JOB_SUBMITTED token=%s asin=%s job_id=%s status_url=%s",
+        token[:8],
+        asin,
+        job_id,
+        status_url,
+    )
 
     started_at = time.time()
     consecutive_errors = 0
+    last_logged_status = None
+    poll_number = 0
 
-    while (
-        time.time()
-        - started_at
-        < MAX_JOB_SECONDS
-    ):
+    while time.time() - started_at < MAX_JOB_SECONDS:
         with STATE_LOCK:
-            state = SCAN_STATE.get(
-                token
-            )
+            state = SCAN_STATE.get(token)
 
             if state is None:
+                logger.warning(
+                    "ASYNC_POLL_ABORT token=%s asin=%s reason=state_missing",
+                    token[:8],
+                    asin,
+                )
                 return
 
-            if (
-                state.get("status")
-                == "finished"
-            ):
+            if state.get("status") == "finished":
                 return
 
-            state_copy = dict(
-                state
-            )
+            state_copy = dict(state)
+
+        poll_number += 1
 
         try:
             result_response = requests.get(
@@ -1093,41 +785,76 @@ def background_run_job(
                 timeout=(3, 6),
             )
 
-            if (
-                result_response.status_code
-                != 200
-            ):
+            if result_response.status_code != 200:
                 consecutive_errors += 1
+
+                logger.warning(
+                    "ASYNC_STATUS_HTTP token=%s asin=%s job_id=%s poll=%s http=%s consecutive_errors=%s",
+                    token[:8],
+                    asin,
+                    job_id,
+                    poll_number,
+                    result_response.status_code,
+                    consecutive_errors,
+                )
 
             else:
                 try:
-                    result_payload = (
-                        result_response.json()
-                    )
+                    result_payload = result_response.json()
 
                 except ValueError:
                     result_payload = None
+                    consecutive_errors += 1
 
-                if isinstance(
-                    result_payload,
-                    dict,
-                ):
+                    logger.warning(
+                        "ASYNC_STATUS_INVALID_JSON token=%s asin=%s job_id=%s poll=%s body=%s",
+                        token[:8],
+                        asin,
+                        job_id,
+                        poll_number,
+                        result_response.text[:500],
+                    )
+
+                if isinstance(result_payload, dict):
                     job_status = str(
-                        result_payload.get(
-                            "status"
-                        )
+                        result_payload.get("status")
                         or ""
                     ).lower()
 
-                    if job_status in (
-                        "finished",
-                        "failed",
+                    attempts = result_payload.get("attempts")
+
+                    with STATE_LOCK:
+                        if token in SCAN_STATE:
+                            SCAN_STATE[token]["remote_status"] = job_status
+                            SCAN_STATE[token]["attempts"] = attempts
+
+                    if (
+                        job_status != last_logged_status
+                        or poll_number % 10 == 0
                     ):
-                        result = (
-                            result_from_payload(
-                                state_copy,
-                                result_payload,
-                            )
+                        logger.info(
+                            "ASYNC_STATUS token=%s asin=%s job_id=%s poll=%s status=%s attempts=%s",
+                            token[:8],
+                            asin,
+                            job_id,
+                            poll_number,
+                            job_status or "unknown",
+                            attempts,
+                        )
+                        last_logged_status = job_status
+
+                    if job_status in ("finished", "failed"):
+                        logger.info(
+                            "ASYNC_TERMINAL token=%s asin=%s job_id=%s status=%s",
+                            token[:8],
+                            asin,
+                            job_id,
+                            job_status,
+                        )
+
+                        result = result_from_payload(
+                            state_copy,
+                            result_payload,
                         )
 
                         finish_state(
@@ -1139,26 +866,49 @@ def background_run_job(
 
                     consecutive_errors = 0
 
-        except requests.RequestException:
+        except requests.Timeout:
             consecutive_errors += 1
 
+            logger.warning(
+                "ASYNC_STATUS_TIMEOUT token=%s asin=%s job_id=%s poll=%s consecutive_errors=%s",
+                token[:8],
+                asin,
+                job_id,
+                poll_number,
+                consecutive_errors,
+            )
+
+        except requests.RequestException as error:
+            consecutive_errors += 1
+
+            logger.warning(
+                "ASYNC_STATUS_ERROR token=%s asin=%s job_id=%s poll=%s consecutive_errors=%s error=%s",
+                token[:8],
+                asin,
+                job_id,
+                poll_number,
+                consecutive_errors,
+                error,
+            )
+
         if consecutive_errors >= 25:
+            logger.error(
+                "ASYNC_STATUS_GIVEUP token=%s asin=%s job_id=%s errors=%s",
+                token[:8],
+                asin,
+                job_id,
+                consecutive_errors,
+            )
+
             finish_state(
                 token,
                 {
                     "asin": asin,
-                    "status": (
-                        "fetch_failed"
-                    ),
-                    "error_code": (
-                        "E221 "
-                        "BACKGROUND_STATUS_FAILURE"
-                    ),
+                    "status": "fetch_failed",
+                    "error_code": "E221 BACKGROUND_STATUS_FAILURE",
                     "warning": (
-                        "E221 "
-                        "BACKGROUND_STATUS_FAILURE: "
-                        "Render could not read "
-                        "the ScraperAPI job status "
+                        "E221 BACKGROUND_STATUS_FAILURE: "
+                        "Render could not read the ScraperAPI job status "
                         "after 25 consecutive attempts."
                     ),
                 },
@@ -1168,86 +918,69 @@ def background_run_job(
 
         time.sleep(4)
 
+    logger.error(
+        "ASYNC_WATCHDOG_TIMEOUT token=%s asin=%s job_id=%s",
+        token[:8],
+        asin,
+        job_id,
+    )
+
     finish_state(
         token,
         {
             "asin": asin,
-            "status": (
-                "fetch_failed"
-            ),
-            "error_code": (
-                "E306 "
-                "SCAN_WATCHDOG_TIMEOUT"
-            ),
+            "status": "fetch_failed",
+            "error_code": "E306 SCAN_WATCHDOG_TIMEOUT",
             "warning": (
-                "E306 "
-                "SCAN_WATCHDOG_TIMEOUT: "
-                "the ScraperAPI job did "
-                "not finish within "
-                "12 minutes."
+                "E306 SCAN_WATCHDOG_TIMEOUT: "
+                "the ScraperAPI job did not finish "
+                "within 12 minutes."
             ),
         },
     )
 
 
 @app.post("/api/scan-start")
-def scan_start(
-    req: StartRequest
-):
-    """
-    Create scan tokens immediately.
-    All ScraperAPI work is backgrounded.
-    """
-
+def scan_start(req: StartRequest):
     cleanup_old_state()
 
-    marketplace = (
-        req.marketplace.upper()
-    )
+    marketplace = req.marketplace.upper()
 
     if marketplace not in MARKETPLACES:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "E001 "
-                "UNSUPPORTED_MARKETPLACE"
-            ),
+            detail="E001 UNSUPPORTED_MARKETPLACE",
         )
 
     if not SCRAPERAPI_KEY:
         raise HTTPException(
             status_code=500,
             detail=(
-                "E110 "
-                "SCRAPERAPI_KEY_ERROR: "
-                "SCRAPERAPI_KEY is "
-                "missing in Render."
+                "E110 SCRAPERAPI_KEY_ERROR: "
+                "SCRAPERAPI_KEY is missing in Render."
             ),
         )
 
     asins = []
 
     for raw in req.asins:
-        asin = clean_asin(
-            raw
-        )
+        asin = clean_asin(raw)
 
-        if (
-            asin
-            and asin not in asins
-        ):
-            asins.append(
-                asin
-            )
+        if asin and asin not in asins:
+            asins.append(asin)
 
     if not asins:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "E002 "
-                "NO_VALID_ASINS"
-            ),
+            detail="E002 NO_VALID_ASINS",
         )
+
+    logger.info(
+        "SCAN_START marketplace=%s asins=%s terms=%s",
+        marketplace,
+        asins,
+        req.terms,
+    )
 
     jobs = []
 
@@ -1256,22 +989,16 @@ def scan_start(
 
         with STATE_LOCK:
             SCAN_STATE[token] = {
-                "created_at": (
-                    time.time()
-                ),
-                "status": (
-                    "submitting"
-                ),
+                "created_at": time.time(),
+                "status": "submitting",
                 "asin": asin,
-                "marketplace": (
-                    marketplace
-                ),
-                "terms": list(
-                    req.terms
-                ),
+                "marketplace": marketplace,
+                "terms": list(req.terms),
                 "result": None,
                 "job_id": None,
                 "status_url": None,
+                "remote_status": "not_submitted",
+                "attempts": None,
             }
 
         thread = threading.Thread(
@@ -1286,11 +1013,15 @@ def scan_start(
             {
                 "asin": asin,
                 "token": token,
-                "status": (
-                    "submitted"
-                ),
+                "status": "submitted",
                 "job_id": None,
             }
+        )
+
+        logger.info(
+            "SCAN_THREAD_STARTED token=%s asin=%s",
+            token[:8],
+            asin,
         )
 
     return {
@@ -1301,9 +1032,7 @@ def scan_start(
 
 
 @app.post("/api/scan-status")
-def scan_status(
-    req: StatusRequest
-):
+def scan_status(req: StatusRequest):
     cleanup_old_state()
 
     token = re.sub(
@@ -1315,108 +1044,55 @@ def scan_status(
     if not token:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "E209 "
-                "INVALID_SCAN_TOKEN"
-            ),
+            detail="E209 INVALID_SCAN_TOKEN",
         )
 
     with STATE_LOCK:
-        state = SCAN_STATE.get(
-            token
-        )
-
-        state_copy = (
-            dict(state)
-            if state
-            else None
-        )
+        state = SCAN_STATE.get(token)
+        state_copy = dict(state) if state else None
 
     if not state_copy:
         return {
-            "status": (
-                "poll_error"
-            ),
-            "error_code": (
-                "E217 "
-                "SCAN_STATE_NOT_FOUND"
-            ),
+            "status": "poll_error",
+            "error_code": "E217 SCAN_STATE_NOT_FOUND",
             "warning": (
-                "E217 "
-                "SCAN_STATE_NOT_FOUND: "
-                "this Render instance "
-                "no longer has the "
-                "scan state. Start "
-                "the scan again."
+                "E217 SCAN_STATE_NOT_FOUND: "
+                "this Render instance no longer has "
+                "the scan state. Start the scan again."
             ),
         }
 
-    if (
-        state_copy.get(
-            "status"
-        )
-        == "finished"
-    ):
-        return (
-            state_copy.get(
-                "result"
-            )
-            or {
-                "asin": (
-                    state_copy.get(
-                        "asin",
-                        "",
-                    )
-                ),
-                "status": (
-                    "fetch_failed"
-                ),
-                "error_code": (
-                    "E218 "
-                    "FINISHED_RESULT_MISSING"
-                ),
-                "warning": (
-                    "E218 "
-                    "FINISHED_RESULT_MISSING: "
-                    "scan finished but "
-                    "no result was stored."
-                ),
-            }
-        )
+    if state_copy.get("status") == "finished":
+        return state_copy.get("result") or {
+            "asin": state_copy.get("asin", ""),
+            "status": "fetch_failed",
+            "error_code": "E218 FINISHED_RESULT_MISSING",
+            "warning": (
+                "E218 FINISHED_RESULT_MISSING: "
+                "scan finished but no result was stored."
+            ),
+        }
 
     return {
-        "asin": state_copy.get(
-            "asin",
-            "",
-        ),
+        "asin": state_copy.get("asin", ""),
         "status": "scanning",
-        "job_id": state_copy.get(
-            "job_id"
-        ),
-        "message": (
-            "Background scan "
-            "still running"
-        ),
+        "job_id": state_copy.get("job_id"),
+        "remote_status": state_copy.get("remote_status"),
+        "attempts": state_copy.get("attempts"),
+        "message": "Background scan still running",
     }
 
 
 @app.get("/")
 def home():
-    return FileResponse(
-        "index.html"
-    )
+    return FileResponse("index.html")
 
 
-@app.get(
-    "/manifest.webmanifest"
-)
+@app.get("/manifest.webmanifest")
 def manifest():
     return FileResponse(
         "manifest.webmanifest",
-        media_type=(
-            "application/"
-            "manifest+json"
-        ),
+        media_type="application/manifest+json",
     )
 
 
@@ -1424,8 +1100,5 @@ def manifest():
 def service_worker():
     return FileResponse(
         "sw.js",
-        media_type=(
-            "application/"
-            "javascript"
-        ),
+        media_type="application/javascript",
     )
