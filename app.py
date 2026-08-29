@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List
 import os
 import re
+import html as html_lib
 import requests
 from bs4 import BeautifulSoup
 
@@ -21,6 +22,18 @@ MARKETPLACES = {
 
 DEFAULT_TERMS = ["organic", "bio", "eco", "lu-bio-04"]
 
+BUILT_IN_ORGANIC_TERMS = [
+    "organic",
+    "organically",
+    "certified organic",
+    "organic certificate",
+    "organic certification",
+    "organic inspection body",
+    "bio",
+    "eco",
+    "ecological",
+]
+
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
 SCRAPERAPI_URL = "https://api.scraperapi.com/"
 
@@ -31,8 +44,8 @@ class ScanRequest(BaseModel):
     terms: List[str] = DEFAULT_TERMS
 
 
-def normalise(text):
-    text = str(text or "")
+def normalize(text):
+    text = html_lib.unescape(str(text or ""))
 
     for dash in ("–", "—", "−", "‐", "-"):
         text = text.replace(dash, "-")
@@ -41,15 +54,13 @@ def normalise(text):
 
 
 def add_section(sections, name, text):
-    text = normalise(text)
+    text = normalize(text)
 
     if text and text not in sections.values():
         sections[name] = text
 
 
-def extract_sections(soup, raw_html):
-    sections = {}
-
+def extract_standard_sections(soup, sections):
     title = soup.select_one("#productTitle")
 
     if title:
@@ -73,12 +84,21 @@ def extract_sections(soup, raw_html):
             ),
         )
 
-    for name, selector in [
+    selectors = [
         ("Product overview", "#productOverview_feature_div"),
         ("Description", "#productDescription"),
         ("Product details", "#detailBullets_feature_div"),
         ("Product details 2", "#productDetails_feature_div"),
-    ]:
+        ("Product details 3", "#productDetails_techSpec_section_1"),
+        ("Product details 4", "#productDetails_detailBullets_sections1"),
+        ("Important information", "#important-information"),
+        ("Important information 2", "#importantInformation"),
+        ("Safety information", "#safety-information"),
+        ("Ingredients", "#ingredients"),
+        ("Directions", "#directions"),
+    ]
+
+    for name, selector in selectors:
         node = soup.select_one(selector)
 
         if node:
@@ -88,74 +108,81 @@ def extract_sections(soup, raw_html):
                 node.get_text(" ", strip=True),
             )
 
-    aplus = (
+
+def extract_aplus(soup, sections):
+    root = (
         soup.select_one("#aplus_feature_div")
         or soup.select_one("#aplus")
     )
 
-    if aplus:
-        modules = aplus.select(
-            ".aplus-module, .premium-aplus-module"
+    if not root:
+        return
+
+    modules = root.select(
+        ".aplus-module, .premium-aplus-module"
+    )
+
+    seen = set()
+    number = 1
+
+    for module in modules:
+        text = normalize(
+            module.get_text(
+                " ",
+                strip=True,
+            )
         )
 
-        seen = set()
-        number = 1
+        if len(text) < 20:
+            continue
 
-        for module in modules:
-            text = normalise(
-                module.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
+        if text in seen:
+            continue
 
-            if len(text) < 20:
-                continue
-
-            if text in seen:
-                continue
-
-            seen.add(text)
-
-            add_section(
-                sections,
-                "A+ module " + str(number),
-                text,
-            )
-
-            number += 1
+        seen.add(text)
 
         add_section(
             sections,
-            "A+ full content",
-            aplus.get_text(
-                " ",
-                strip=True,
-            ),
+            "A+ module " + str(number),
+            text,
         )
 
-    regulatory_regex = re.compile(
+        number += 1
+
+    add_section(
+        sections,
+        "A+ full content",
+        root.get_text(
+            " ",
+            strip=True,
+        ),
+    )
+
+
+def extract_regulatory(soup, raw_html, sections):
+    marker = re.compile(
         r"organic inspection body code|"
         r"regulatory information|"
-        r"[A-Z]{2,3}[\s\-–—−‐-]*BIO"
-        r"[\s\-–—−‐-]*\d{2,3}",
+        r"safety and product resources|"
+        r"\b[A-Z]{2,3}[\s\-–—−‐-]*BIO"
+        r"[\s\-–—−‐-]*\d{2,3}\b",
         re.I,
     )
 
-    regulatory_seen = set()
-    regulatory_number = 1
+    seen = set()
+    number = 1
 
     for text_node in soup.find_all(
-        string=regulatory_regex
+        string=marker
     ):
         node = text_node.parent
         chosen = ""
 
-        for _ in range(7):
+        for _ in range(8):
             if node is None:
                 break
 
-            candidate = normalise(
+            candidate = normalize(
                 node.get_text(
                     " ",
                     strip=True,
@@ -163,61 +190,118 @@ def extract_sections(soup, raw_html):
             )
 
             if (
-                20 <= len(candidate) <= 2000
-                and regulatory_regex.search(candidate)
+                20 <= len(candidate) <= 3000
+                and marker.search(candidate)
             ):
                 chosen = candidate
-                break
+
+                if (
+                    "organic inspection body code"
+                    in candidate.lower()
+                    or re.search(
+                        r"\b[A-Z]{2,3}"
+                        r"[\s-]*BIO"
+                        r"[\s-]*\d{2,3}\b",
+                        candidate,
+                        re.I,
+                    )
+                ):
+                    break
 
             node = node.parent
 
         if (
             chosen
-            and chosen not in regulatory_seen
+            and chosen not in seen
         ):
-            regulatory_seen.add(chosen)
+            seen.add(chosen)
 
             add_section(
                 sections,
                 "Regulatory information "
-                + str(regulatory_number),
+                + str(number),
                 chosen,
             )
 
-            regulatory_number += 1
+            number += 1
 
-    raw_text = normalise(
-        BeautifulSoup(
-            raw_html,
-            "html.parser",
-        ).get_text(
-            " ",
-            strip=True,
-        )
+    raw_normalized = normalize(
+        raw_html
     )
 
-    raw_match = re.search(
-        r".{0,350}"
-        r"(organic inspection body code|"
-        r"[A-Z]{2,3}[\s-]*BIO[\s-]*\d{2,3})"
-        r".{0,650}",
-        raw_text,
-        re.I,
+    fallback = re.compile(
+        r".{0,500}"
+        r"(?:organic inspection body code|"
+        r"\b[A-Z]{2,3}[\s-]*BIO"
+        r"[\s-]*\d{2,3}\b)"
+        r".{0,900}",
+        re.I | re.S,
     )
 
-    if raw_match:
-        add_section(
-            sections,
-            "Regulatory raw text",
-            raw_match.group(0),
+    for raw_match in fallback.finditer(
+        raw_normalized
+    ):
+        fragment = raw_match.group(0)
+
+        text = normalize(
+            BeautifulSoup(
+                fragment,
+                "html.parser",
+            ).get_text(
+                " ",
+                strip=True,
+            )
         )
+
+        if (
+            text
+            and text not in seen
+        ):
+            seen.add(text)
+
+            add_section(
+                sections,
+                "Regulatory source data "
+                + str(number),
+                text,
+            )
+
+            number += 1
+
+
+def parse_page(raw_html):
+    soup = BeautifulSoup(
+        raw_html,
+        "html.parser",
+    )
+
+    sections = {}
+
+    extract_standard_sections(
+        soup,
+        sections,
+    )
+
+    extract_aplus(
+        soup,
+        sections,
+    )
+
+    extract_regulatory(
+        soup,
+        raw_html,
+        sections,
+    )
 
     return sections
 
 
-def term_regex(term):
-    term = normalise(term)
+def make_pattern(term):
+    term = normalize(term)
     lower = term.lower()
+
+    if not term:
+        return None
 
     if lower == "organic":
         return re.compile(
@@ -247,8 +331,16 @@ def term_regex(term):
             re.I,
         )
 
-    if not term:
-        return None
+    if re.fullmatch(
+        r"[A-Za-z0-9]+",
+        term,
+    ):
+        return re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(term)
+            + r"(?![A-Za-z0-9])",
+            re.I,
+        )
 
     return re.compile(
         re.escape(term),
@@ -256,19 +348,41 @@ def term_regex(term):
     )
 
 
+def build_search_terms(user_terms):
+    combined = []
+
+    for term in (
+        list(user_terms)
+        + BUILT_IN_ORGANIC_TERMS
+    ):
+        term = normalize(term)
+
+        if not term:
+            continue
+
+        if term.lower() not in [
+            x.lower()
+            for x in combined
+        ]:
+            combined.append(term)
+
+    return combined
+
+
 def find_matches(sections, terms):
     matches = []
     seen = set()
+
     patterns = []
 
     for term in terms:
-        regex = term_regex(term)
+        pattern = make_pattern(term)
 
-        if regex:
+        if pattern is not None:
             patterns.append(
                 (
-                    normalise(term),
-                    regex,
+                    term,
+                    pattern,
                 )
             )
 
@@ -285,9 +399,9 @@ def find_matches(sections, terms):
     )
 
     for section, text in sections.items():
-        for label, regex in patterns:
+        for label, pattern in patterns:
             found = list(
-                regex.finditer(text)
+                pattern.finditer(text)
             )
 
             if not found:
@@ -312,7 +426,7 @@ def find_matches(sections, terms):
 
             right = min(
                 len(text),
-                first.end() + 300,
+                first.end() + 320,
             )
 
             matches.append(
@@ -328,50 +442,90 @@ def find_matches(sections, terms):
     return matches
 
 
-def fetch_amazon(url, marketplace):
+def error_code_for_http(status):
+    if status == 401:
+        return (
+            "E110 "
+            "SCRAPERAPI_KEY_ERROR"
+        )
+
+    if status == 403:
+        return (
+            "E102 "
+            "SCRAPERAPI_HTTP_403"
+        )
+
+    if status == 429:
+        return (
+            "E103 "
+            "SCRAPERAPI_HTTP_429"
+        )
+
+    if 500 <= status <= 599:
+        return (
+            "E104 "
+            "SCRAPERAPI_HTTP_"
+            + str(status)
+        )
+
+    return (
+        "E120 "
+        "SCRAPERAPI_HTTP_"
+        + str(status)
+    )
+
+
+def scraper_request(
+    url,
+    marketplace,
+    render=False,
+):
     country = (
         "uk"
         if marketplace == "UK"
         else marketplace.lower()
     )
 
+    params = {
+        "api_key": SCRAPERAPI_KEY,
+        "url": url,
+        "country_code": country,
+    }
+
+    if render:
+        params["render"] = "true"
+
     return requests.get(
         SCRAPERAPI_URL,
-        params={
-            "api_key": SCRAPERAPI_KEY,
-            "url": url,
-            "country_code": country,
-            "render": "true",
-        },
-        timeout=30,
+        params=params,
+        timeout=(
+            25
+            if not render
+            else 35
+        ),
     )
 
 
-def http_error_code(status):
-    if status == 401:
-        return "E110 SCRAPERAPI_KEY_ERROR"
-
-    if status == 403:
-        return "E102 SCRAPERAPI_HTTP_403"
-
-    if status == 429:
-        return "E103 SCRAPERAPI_HTTP_429"
-
-    if 500 <= status <= 599:
-        return (
-            "E104 SCRAPERAPI_HTTP_"
-            + str(status)
-        )
+def page_is_captcha(text):
+    lower = text.lower()
 
     return (
-        "E120 SCRAPERAPI_HTTP_"
-        + str(status)
+        "enter the characters "
+        "you see below"
+        in lower
+        or
+        "sorry, we just need "
+        "to make sure you're "
+        "not a robot"
+        in lower
     )
 
 
 @app.post("/api/scan")
 def scan(req: ScanRequest):
-    marketplace = req.marketplace.upper()
+    marketplace = (
+        req.marketplace.upper()
+    )
 
     if marketplace not in MARKETPLACES:
         raise HTTPException(
@@ -387,7 +541,9 @@ def scan(req: ScanRequest):
             status_code=500,
             detail=(
                 "E110 "
-                "SCRAPERAPI_KEY_ERROR"
+                "SCRAPERAPI_KEY_ERROR: "
+                "SCRAPERAPI_KEY is missing "
+                "in Render."
             ),
         )
 
@@ -409,8 +565,17 @@ def scan(req: ScanRequest):
     if not asins:
         raise HTTPException(
             status_code=400,
-            detail="E002 NO_VALID_ASINS",
+            detail=(
+                "E002 "
+                "NO_VALID_ASINS"
+            ),
         )
+
+    search_terms = (
+        build_search_terms(
+            req.terms
+        )
+    )
 
     results = []
 
@@ -427,18 +592,30 @@ def scan(req: ScanRequest):
             "matches": [],
             "warning": None,
             "error_code": None,
+            "http_status": None,
+            "fetch_stage": "raw_html",
             "sections_found": [],
         }
 
         try:
-            response = fetch_amazon(
+            response = scraper_request(
                 url,
                 marketplace,
+                render=False,
             )
 
-            if response.status_code != 200:
-                code = http_error_code(
-                    response.status_code
+            item["http_status"] = (
+                response.status_code
+            )
+
+            if (
+                response.status_code
+                != 200
+            ):
+                code = (
+                    error_code_for_http(
+                        response.status_code
+                    )
                 )
 
                 item["status"] = (
@@ -449,41 +626,142 @@ def scan(req: ScanRequest):
 
                 item["warning"] = (
                     code
-                    + ": HTTP "
+                    + ": ScraperAPI raw "
+                    "HTML request returned HTTP "
                     + str(
                         response.status_code
                     )
+                    + "."
                 )
 
                 results.append(item)
                 continue
 
-            lower = response.text.lower()
-
-            if (
-                "enter the characters you see below"
-                in lower
+            if page_is_captcha(
+                response.text
             ):
-                item["status"] = "blocked"
-                item["error_code"] = (
-                    "E130 AMAZON_CAPTCHA"
+                item["status"] = (
+                    "blocked"
                 )
+
+                item["error_code"] = (
+                    "E130 "
+                    "AMAZON_CAPTCHA"
+                )
+
                 item["warning"] = (
-                    "E130 AMAZON_CAPTCHA"
+                    "E130 AMAZON_CAPTCHA: "
+                    "Amazon returned a "
+                    "robot/CAPTCHA page."
                 )
 
                 results.append(item)
                 continue
 
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser",
+            sections = parse_page(
+                response.text
             )
 
-            sections = extract_sections(
-                soup,
-                response.text,
+            has_regulatory = any(
+                name.startswith(
+                    "Regulatory"
+                )
+                for name in sections
             )
+
+            has_aplus = any(
+                name.startswith("A+")
+                for name in sections
+            )
+
+            raw_mentions_aplus = (
+                "aplus"
+                in response.text.lower()
+                or
+                "a-plus"
+                in response.text.lower()
+            )
+
+            needs_render_fallback = (
+                not has_regulatory
+                or (
+                    raw_mentions_aplus
+                    and not has_aplus
+                )
+            )
+
+            if needs_render_fallback:
+                try:
+                    rendered = (
+                        scraper_request(
+                            url,
+                            marketplace,
+                            render=True,
+                        )
+                    )
+
+                    if (
+                        rendered.status_code
+                        == 200
+                        and not page_is_captcha(
+                            rendered.text
+                        )
+                    ):
+                        rendered_sections = (
+                            parse_page(
+                                rendered.text
+                            )
+                        )
+
+                        for (
+                            name,
+                            text,
+                        ) in (
+                            rendered_sections.items()
+                        ):
+                            if (
+                                name
+                                not in sections
+                            ):
+                                sections[
+                                    name
+                                ] = text
+
+                        item[
+                            "fetch_stage"
+                        ] = (
+                            "raw_html+"
+                            "render_fallback"
+                        )
+
+                    elif (
+                        rendered.status_code
+                        != 200
+                    ):
+                        item[
+                            "warning"
+                        ] = (
+                            error_code_for_http(
+                                rendered.status_code
+                            )
+                            + ": render fallback "
+                            "returned HTTP "
+                            + str(
+                                rendered.status_code
+                            )
+                            + "."
+                        )
+
+                except requests.Timeout:
+                    item[
+                        "warning"
+                    ] = (
+                        "E101 "
+                        "SCRAPERAPI_TIMEOUT: "
+                        "render fallback timed "
+                        "out; raw HTML result "
+                        "was kept."
+                    )
 
             item["title"] = (
                 sections.get(
@@ -492,20 +770,17 @@ def scan(req: ScanRequest):
                 )
             )
 
-            item["sections_found"] = (
-                list(
-                    sections.keys()
+            item[
+                "sections_found"
+            ] = list(
+                sections.keys()
+            )
+
+            item["matches"] = (
+                find_matches(
+                    sections,
+                    search_terms,
                 )
-            )
-
-            item["matches"] = find_matches(
-                sections,
-                req.terms,
-            )
-
-            has_aplus = any(
-                name.startswith("A+")
-                for name in sections
             )
 
             has_regulatory = any(
@@ -516,7 +791,9 @@ def scan(req: ScanRequest):
             )
 
             if item["matches"]:
-                item["status"] = "matched"
+                item["status"] = (
+                    "matched"
+                )
 
             elif not item["title"]:
                 item["status"] = (
@@ -524,32 +801,15 @@ def scan(req: ScanRequest):
                 )
 
                 item["error_code"] = (
-                    "E106 AMAZON_DATA_EMPTY"
+                    "E106 "
+                    "AMAZON_DATA_EMPTY"
                 )
 
                 item["warning"] = (
                     "E106 AMAZON_DATA_EMPTY: "
-                    "no product title extracted"
-                )
-
-            elif (
-                not has_aplus
-                and not has_regulatory
-            ):
-                item["status"] = (
-                    "incomplete"
-                )
-
-                item["error_code"] = (
-                    "E107 "
-                    "TARGET_SECTIONS_NOT_RETURNED"
-                )
-
-                item["warning"] = (
-                    "E107 "
-                    "TARGET_SECTIONS_NOT_RETURNED: "
-                    "A+ and Regulatory Information "
-                    "were absent from fetched HTML"
+                    "Amazon HTML was returned, "
+                    "but the product title "
+                    "could not be extracted."
                 )
 
             elif not has_regulatory:
@@ -562,13 +822,23 @@ def scan(req: ScanRequest):
                     "REGULATORY_DATA_NOT_RETURNED"
                 )
 
-                item["warning"] = (
-                    "E108 "
-                    "REGULATORY_DATA_NOT_RETURNED"
-                )
+                if not item["warning"]:
+                    item["warning"] = (
+                        "E108 "
+                        "REGULATORY_DATA_NOT_RETURNED: "
+                        "product content was "
+                        "retrieved, but Amazon "
+                        "Regulatory Information "
+                        "was not exposed in the "
+                        "raw HTML or render "
+                        "fallback. This ASIN is "
+                        "not confirmed clear."
+                    )
 
             else:
-                item["status"] = "clear"
+                item["status"] = (
+                    "clear"
+                )
 
             results.append(item)
 
@@ -578,12 +848,15 @@ def scan(req: ScanRequest):
             )
 
             item["error_code"] = (
-                "E101 SCRAPERAPI_TIMEOUT"
+                "E101 "
+                "SCRAPERAPI_TIMEOUT"
             )
 
             item["warning"] = (
                 "E101 SCRAPERAPI_TIMEOUT: "
-                "no response within 30 seconds"
+                "ScraperAPI did not return "
+                "the Amazon page before "
+                "the request timeout."
             )
 
             results.append(item)
@@ -653,14 +926,18 @@ def scan(req: ScanRequest):
 
 @app.get("/")
 def home():
-    return FileResponse("index.html")
+    return FileResponse(
+        "index.html"
+    )
 
 
 @app.get("/manifest.webmanifest")
 def manifest():
     return FileResponse(
         "manifest.webmanifest",
-        media_type="application/manifest+json",
+        media_type=(
+            "application/manifest+json"
+        ),
     )
 
 
@@ -668,5 +945,7 @@ def manifest():
 def service_worker():
     return FileResponse(
         "sw.js",
-        media_type="application/javascript",
+        media_type=(
+            "application/javascript"
+        ),
     )
