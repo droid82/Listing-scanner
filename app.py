@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("listing-scanner")
 
-BUILD_ID = "2026-08-30-fast-regulatory-spapi-v2"
+BUILD_ID = "2026-08-30-fast-regulatory-spapi-browse-test-v3"
 
 MARKETPLACES = {
     "UK": {"url": "https://www.amazon.co.uk/dp/{}", "country": "uk"},
@@ -122,6 +122,15 @@ class CategoryPreviewRequest(CatalogLookupRequest):
 
 
 class CategoryApplyRequest(CategoryPreviewRequest):
+    confirm: str = ""
+
+
+class BrowseNodeActionRequest(CatalogLookupRequest):
+    confirm: str = ""
+
+
+class BrowseNodeRestoreRequest(CatalogLookupRequest):
+    browse_node: str
     confirm: str = ""
 
 
@@ -1562,6 +1571,12 @@ def _diagnose_catalog(req):
         "title": title,
         "listing_statuses": listing.get("summaries") or [],
         "listing_issues": listing.get("issues") or [],
+        "issue_100871_present": any(
+            str((issue or {}).get("code", "")) == "100871"
+            for issue in (listing.get("issues") or [])
+            if isinstance(issue, dict)
+        ),
+        "submitted_recommended_browse_nodes": (listing.get("attributes") or {}).get("recommended_browse_nodes"),
         "classification_attributes": _relevant_attributes(listing.get("attributes") or {}),
         "all_product_types": listing.get("productTypes") or [],
         "catalog_classifications": catalog_data.get("classifications") or [] if isinstance(catalog_data, dict) else [],
@@ -1707,6 +1722,219 @@ def catalog_category_apply(req: CategoryApplyRequest, x_admin_key: str = Header(
         ),
     }
 
+def _prepare_browse_node_delete(req):
+    asin = clean_asin(req.asin)
+    if not asin:
+        raise HTTPException(status_code=400, detail="Invalid ASIN")
+    marketplace, marketplace_id = _sp_marketplace(req.marketplace)
+    listing, sku_candidates = _resolve_listing(asin, marketplace_id, sku=(req.sku or "").strip() or None)
+    if len(sku_candidates) != 1 and not (req.sku or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "More than one seller SKU is attached to this ASIN. Choose the exact SKU before writing.",
+                "sku_candidates": sku_candidates,
+            },
+        )
+    sku = (req.sku or "").strip() or sku_candidates[0]
+    listing = _get_listing_item(sku, marketplace_id)
+    product_type = _current_product_type(listing)
+    if not product_type:
+        raise HTTPException(status_code=409, detail="Amazon did not return the current productType, so no write was attempted.")
+    current = copy.deepcopy((listing.get("attributes") or {}).get("recommended_browse_nodes"))
+    if not isinstance(current, list) or not current:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This listing has no seller-submitted recommended_browse_nodes attribute in the selected marketplace. "
+                "Nothing was changed."
+            ),
+        )
+    body = {
+        "productType": product_type,
+        "patches": [
+            {"op": "delete", "path": "/attributes/recommended_browse_nodes"}
+        ],
+    }
+    return asin, marketplace, marketplace_id, sku, product_type, listing, current, body
+
+
+def _preview_browse_node_delete(req):
+    asin, marketplace, marketplace_id, sku, product_type, listing, current, body = _prepare_browse_node_delete(req)
+    response = _sp_request(
+        "PATCH",
+        f"/listings/2021-08-01/items/{SP_API_SELLER_ID}/{requests.utils.quote(sku, safe='')}",
+        params={"marketplaceIds": marketplace_id, "mode": "VALIDATION_PREVIEW", "includedData": "issues,identifiers"},
+        json_body=body,
+    )
+    issues = response.get("issues") or []
+    errors = [issue for issue in issues if str((issue or {}).get("severity", "")).upper() == "ERROR"]
+    return {
+        "marketplace": marketplace,
+        "asin": asin,
+        "sku": sku,
+        "current_product_type": product_type,
+        "current_recommended_browse_nodes": current,
+        "request_body": body,
+        "validation": response,
+        "has_validation_errors": bool(errors),
+        "validation_errors": errors,
+        "safe_to_submit": not bool(errors),
+        "important": (
+            "VALIDATION_PREVIEW only. Amazon has not changed the live listing. "
+            "A successful preview confirms only that Amazon accepts the patch format; it does not prove traffic will be unaffected."
+        ),
+    }
+
+
+def _normalise_browse_node_value(raw):
+    node = re.sub(r"[^0-9]", "", str(raw or ""))
+    if not node or len(node) > 15:
+        raise HTTPException(status_code=400, detail="browse_node must be a numeric Amazon browse-node ID")
+    return node
+
+
+def _prepare_browse_node_restore(req):
+    asin = clean_asin(req.asin)
+    if not asin:
+        raise HTTPException(status_code=400, detail="Invalid ASIN")
+    node = _normalise_browse_node_value(req.browse_node)
+    marketplace, marketplace_id = _sp_marketplace(req.marketplace)
+    listing, sku_candidates = _resolve_listing(asin, marketplace_id, sku=(req.sku or "").strip() or None)
+    if len(sku_candidates) != 1 and not (req.sku or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "More than one seller SKU is attached to this ASIN. Choose the exact SKU before writing.",
+                "sku_candidates": sku_candidates,
+            },
+        )
+    sku = (req.sku or "").strip() or sku_candidates[0]
+    listing = _get_listing_item(sku, marketplace_id)
+    product_type = _current_product_type(listing)
+    if not product_type:
+        raise HTTPException(status_code=409, detail="Amazon did not return the current productType, so no write was attempted.")
+    current = copy.deepcopy((listing.get("attributes") or {}).get("recommended_browse_nodes"))
+    op = "replace" if isinstance(current, list) and current else "add"
+    body = {
+        "productType": product_type,
+        "patches": [
+            {
+                "op": op,
+                "path": "/attributes/recommended_browse_nodes",
+                "value": [{"value": node, "marketplace_id": marketplace_id}],
+            }
+        ],
+    }
+    return asin, marketplace, marketplace_id, sku, product_type, listing, current, node, body
+
+
+def _preview_browse_node_restore(req):
+    asin, marketplace, marketplace_id, sku, product_type, listing, current, node, body = _prepare_browse_node_restore(req)
+    response = _sp_request(
+        "PATCH",
+        f"/listings/2021-08-01/items/{SP_API_SELLER_ID}/{requests.utils.quote(sku, safe='')}",
+        params={"marketplaceIds": marketplace_id, "mode": "VALIDATION_PREVIEW", "includedData": "issues,identifiers"},
+        json_body=body,
+    )
+    issues = response.get("issues") or []
+    errors = [issue for issue in issues if str((issue or {}).get("severity", "")).upper() == "ERROR"]
+    return {
+        "marketplace": marketplace,
+        "asin": asin,
+        "sku": sku,
+        "current_product_type": product_type,
+        "current_recommended_browse_nodes": current,
+        "restore_browse_node": node,
+        "request_body": body,
+        "validation": response,
+        "has_validation_errors": bool(errors),
+        "validation_errors": errors,
+        "safe_to_submit": not bool(errors),
+    }
+
+
+@app.post("/api/catalog/browse-node-remove-preview")
+def catalog_browse_node_remove_preview(req: BrowseNodeActionRequest, x_admin_key: str = Header(default="")):
+    _admin_guard(x_admin_key)
+    _sp_require_config()
+    return _preview_browse_node_delete(req)
+
+
+@app.post("/api/catalog/browse-node-remove-apply")
+def catalog_browse_node_remove_apply(req: BrowseNodeActionRequest, x_admin_key: str = Header(default="")):
+    _admin_guard(x_admin_key)
+    _sp_require_config()
+    if req.confirm.strip().upper() != "REMOVE NODE":
+        raise HTTPException(status_code=400, detail='To make this live change, confirm must equal "REMOVE NODE".')
+
+    preview = _preview_browse_node_delete(req)
+    if preview.get("has_validation_errors"):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Amazon validation preview contains ERROR issues. Nothing was changed.", "preview": preview},
+        )
+
+    _, marketplace_id = _sp_marketplace(req.marketplace)
+    sku = preview["sku"]
+    response = _sp_request(
+        "PATCH",
+        f"/listings/2021-08-01/items/{SP_API_SELLER_ID}/{requests.utils.quote(sku, safe='')}",
+        params={"marketplaceIds": marketplace_id},
+        json_body=preview["request_body"],
+    )
+    immediate = _safe_sp_call("diagnostic_after_browse_node_remove", lambda: _diagnose_catalog(req))
+    return {
+        "submitted": True,
+        "amazon_submission": response,
+        "original_recommended_browse_nodes": preview["current_recommended_browse_nodes"],
+        "restore_hint": "Keep the original node value(s). Use Restore Original Browse Node if the catalogue classification changes unexpectedly.",
+        "immediate_diagnostic": immediate,
+        "message": (
+            "The seller-submitted recommended_browse_nodes attribute was removed. Amazon's catalogue/search classification may recalculate asynchronously. "
+            "Re-run Diagnose and watch issue_100871_present plus catalog_classifications before deciding whether to leave it removed."
+        ),
+    }
+
+
+@app.post("/api/catalog/browse-node-restore-preview")
+def catalog_browse_node_restore_preview(req: BrowseNodeRestoreRequest, x_admin_key: str = Header(default="")):
+    _admin_guard(x_admin_key)
+    _sp_require_config()
+    return _preview_browse_node_restore(req)
+
+
+@app.post("/api/catalog/browse-node-restore-apply")
+def catalog_browse_node_restore_apply(req: BrowseNodeRestoreRequest, x_admin_key: str = Header(default="")):
+    _admin_guard(x_admin_key)
+    _sp_require_config()
+    if req.confirm.strip().upper() != "RESTORE NODE":
+        raise HTTPException(status_code=400, detail='To restore the live node, confirm must equal "RESTORE NODE".')
+
+    preview = _preview_browse_node_restore(req)
+    if preview.get("has_validation_errors"):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Amazon validation preview contains ERROR issues. Nothing was changed.", "preview": preview},
+        )
+
+    _, marketplace_id = _sp_marketplace(req.marketplace)
+    sku = preview["sku"]
+    response = _sp_request(
+        "PATCH",
+        f"/listings/2021-08-01/items/{SP_API_SELLER_ID}/{requests.utils.quote(sku, safe='')}",
+        params={"marketplaceIds": marketplace_id},
+        json_body=preview["request_body"],
+    )
+    immediate = _safe_sp_call("diagnostic_after_browse_node_restore", lambda: _diagnose_catalog(req))
+    return {
+        "submitted": True,
+        "amazon_submission": response,
+        "restored_browse_node": preview["restore_browse_node"],
+        "immediate_diagnostic": immediate,
+        "message": "The browse-node contribution was submitted for restoration. Amazon may take time to recalculate catalogue/search placement.",
+    }
+
 
 @app.get("/catalog-admin", response_class=HTMLResponse)
 def catalog_admin_page():
@@ -1718,32 +1946,64 @@ body{font-family:Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16p
 .card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 3px #0001}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
 label{font-weight:700;font-size:14px;display:block;margin-bottom:5px}input,select,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #bbb;width:100%;box-sizing:border-box}
-button{background:#1769aa;color:#fff;border:0;font-weight:700;cursor:pointer}.danger{background:#a31d1d}.secondary{background:#555}
-pre{white-space:pre-wrap;word-break:break-word;background:#111;color:#eee;padding:12px;border-radius:8px;max-height:620px;overflow:auto}
+button{background:#1769aa;color:#fff;border:0;font-weight:700;cursor:pointer}.danger{background:#a31d1d}.restore{background:#176f3a}.secondary{background:#555}
+pre{white-space:pre-wrap;word-break:break-word;background:#111;color:#eee;padding:12px;border-radius:8px;max-height:720px;overflow:auto}
 .small{font-size:13px;color:#555}.warn{background:#fff4d6;border-left:5px solid #e7a300;padding:10px 12px;border-radius:6px}
-.ok{color:#087a24;font-weight:700}.bad{color:#a31d1d;font-weight:700}@media(max-width:700px){.row,.row3{grid-template-columns:1fr}}
+.ok{color:#087a24;font-weight:700}.bad{color:#a31d1d;font-weight:700}.flag{font-size:17px;font-weight:700;margin-top:10px}@media(max-width:700px){.row,.row3{grid-template-columns:1fr}}
 </style></head><body>
 <h1>Amazon Inbound Gate / Catalogue Admin</h1>
-<p class="warn"><b>This uses Amazon SP-API, not a hidden Seller Central backend.</b> It checks your listing classification, official listing restrictions and FBA INBOUND eligibility, then lets you validation-preview and submit a correction to the seller-controlled <code>item_type_keyword</code>. It cannot directly edit Amazon's internal <code>gl_product_group</code>.</p>
+<p class="warn"><b>Controlled test:</b> this uses your authorised Amazon SP-API access. For the current organic-gate investigation, do not change <code>productType</code> or move the ASIN to a different category. The test below removes only your seller-submitted <code>recommended_browse_nodes</code> contribution. Amazon may continue to classify the ASIN in the same browse node from catalogue data.</p>
 <div class="card"><div class="row3">
 <div><label>Admin key</label><input id="key" type="password" autocomplete="off"></div>
 <div><label>Marketplace</label><select id="mp"><option>UK</option><option>IE</option><option>BE</option><option>DE</option><option>FR</option><option>IT</option><option>ES</option><option>NL</option></select></div>
-<div><label>ASIN</label><input id="asin" value="B083V8GFSZ"></div></div>
+<div><label>ASIN</label><input id="asin" value="B0BWS9L77Y"></div></div>
 <div style="margin-top:12px"><label>SKU (leave blank unless Amazon returns more than one)</label><input id="sku"></div>
-<div style="margin-top:12px" class="row"><button onclick="diagnose()">Diagnose classification + inbound gate</button><button class="secondary" onclick="compareIE()">Compare same ASIN in Ireland</button></div></div>
-<div class="card"><h2>Controlled category correction</h2>
-<p class="small">Enter only the correct Amazon item-type keyword. Preview does not change the live listing. Apply re-runs preview and refuses to submit if Amazon returns an ERROR.</p>
-<label>New item_type_keyword</label><input id="keyword" placeholder="Enter the correct Amazon item type keyword">
-<div class="row" style="margin-top:12px"><button onclick="previewPatch()">Validation preview only</button><button class="danger" onclick="applyPatch()">APPLY live correction</button></div></div>
-<div class="card"><h2>Result</h2><div id="status" class="small"></div><pre id="out">Ready.</pre></div>
+<div style="margin-top:12px" class="row"><button onclick="diagnose()">Diagnose / check 100871</button><button class="secondary" onclick="compareIE()">Compare same ASIN in Ireland</button></div>
+<div id="flag" class="flag"></div></div>
+
+<div class="card"><h2>Browse-node experiment</h2>
+<p class="small">Step 1 is validation-only and changes nothing. If Amazon accepts it, Step 2 removes only the seller-submitted <code>recommended_browse_nodes</code> attribute. The original node is captured below so it can be restored.</p>
+<div class="row"><button onclick="previewRemoveNode()">1. PREVIEW removal — no change</button><button class="danger" onclick="applyRemoveNode()">2. REMOVE live browse-node contribution</button></div>
+<div style="margin-top:14px"><label>Original browse node / restore value</label><input id="restoreNode" value="471352031" inputmode="numeric"></div>
+<p class="small">For Cuckoo UK, the baseline we observed was <b>471352031 — Catnip &amp; Cat Grass</b>. Diagnose first: the page automatically captures the currently submitted value before you remove it.</p>
+<div class="row" style="margin-top:12px"><button class="secondary" onclick="previewRestoreNode()">Preview restore — no change</button><button class="restore" onclick="applyRestoreNode()">RESTORE original node live</button></div>
+</div>
+
+<div class="card"><h2>Result</h2><div id="status" class="small"></div><pre id="out">Ready. Diagnose the UK ASIN first.</pre></div>
 <script>
-const out=document.getElementById('out'), statusEl=document.getElementById('status');
+const out=document.getElementById('out'), statusEl=document.getElementById('status'), flagEl=document.getElementById('flag');
 function payload(extra={}){return Object.assign({asin:document.getElementById('asin').value.trim(),marketplace:document.getElementById('mp').value,sku:document.getElementById('sku').value.trim()||null},extra)}
-async function call(path,body){statusEl.textContent='Working…';out.textContent='Working…';try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':document.getElementById('key').value},body:JSON.stringify(body)});const data=await r.json();out.textContent=JSON.stringify(data,null,2);statusEl.textContent=r.ok?'Completed':'Amazon/app returned an error';statusEl.className=r.ok?'ok':'bad';return {ok:r.ok,data};}catch(e){out.textContent=String(e);statusEl.textContent='Request failed';statusEl.className='bad';}}
-function diagnose(){return call('/api/catalog/diagnostic',payload())}
-async function compareIE(){const original=document.getElementById('mp').value;document.getElementById('mp').value='IE';await diagnose();document.getElementById('mp').value=original;}
-function previewPatch(){const k=document.getElementById('keyword').value.trim();if(!k){alert('Enter a new item_type_keyword first.');return;}return call('/api/catalog/category-preview',payload({new_item_type_keyword:k}))}
-async function applyPatch(){const k=document.getElementById('keyword').value.trim();if(!k){alert('Enter a new item_type_keyword first.');return;}if(!confirm('This will submit a LIVE seller catalogue change to Amazon. Continue?'))return;return call('/api/catalog/category-apply',payload({new_item_type_keyword:k,confirm:'APPLY'}))}
+function storageKey(){return 'browseSnapshot:'+document.getElementById('mp').value+':'+document.getElementById('asin').value.trim().toUpperCase()}
+function captureSnapshot(data){
+  const arr=data&&data.submitted_recommended_browse_nodes;
+  if(Array.isArray(arr)&&arr.length){
+    const first=arr.find(x=>x&&x.value)||arr[0];
+    if(first&&first.value){document.getElementById('restoreNode').value=first.value;localStorage.setItem(storageKey(),String(first.value));}
+  } else {const saved=localStorage.getItem(storageKey());if(saved)document.getElementById('restoreNode').value=saved;}
+}
+function showFlag(data){
+  if(!data||typeof data.issue_100871_present==='undefined'){flagEl.textContent='';return;}
+  if(data.issue_100871_present){flagEl.textContent='⚠ Organic issue 100871 is PRESENT';flagEl.className='flag bad';}
+  else{flagEl.textContent='✓ Organic issue 100871 is NOT present';flagEl.className='flag ok';}
+}
+async function call(path,body){statusEl.textContent='Working…';out.textContent='Working…';try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':document.getElementById('key').value},body:JSON.stringify(body)});const data=await r.json();out.textContent=JSON.stringify(data,null,2);statusEl.textContent=r.ok?'Completed':'Amazon/app returned an error';statusEl.className=r.ok?'ok':'bad';return {ok:r.ok,data};}catch(e){out.textContent=String(e);statusEl.textContent='Request failed';statusEl.className='bad';return {ok:false,data:null};}}
+async function diagnose(){const r=await call('/api/catalog/diagnostic',payload());if(r.ok){captureSnapshot(r.data);showFlag(r.data);}return r;}
+async function compareIE(){const original=document.getElementById('mp').value;document.getElementById('mp').value='IE';await diagnose();document.getElementById('mp').value=original;const saved=localStorage.getItem(storageKey());if(saved)document.getElementById('restoreNode').value=saved;}
+async function previewRemoveNode(){const r=await call('/api/catalog/browse-node-remove-preview',payload());if(r.ok&&r.data&&Array.isArray(r.data.current_recommended_browse_nodes)&&r.data.current_recommended_browse_nodes.length){const n=r.data.current_recommended_browse_nodes[0].value;if(n){document.getElementById('restoreNode').value=n;localStorage.setItem(storageKey(),String(n));}}return r;}
+async function applyRemoveNode(){
+  if(document.getElementById('mp').value!=='UK'){if(!confirm('You are not on UK. This experiment was designed around the UK organic issue. Continue anyway?'))return;}
+  const node=document.getElementById('restoreNode').value.trim();
+  if(!node){alert('Diagnose/preview first so the original browse node is saved.');return;}
+  const typed=prompt('LIVE CHANGE. This removes your seller-submitted browse-node contribution. The restore value saved is '+node+'. Type REMOVE NODE to continue:');
+  if(typed!=='REMOVE NODE')return;
+  const r=await call('/api/catalog/browse-node-remove-apply',payload({confirm:'REMOVE NODE'}));
+  if(r.ok){statusEl.textContent='Submitted. Re-run Diagnose to check issue 100871 and catalogue classification.';}
+  return r;
+}
+function restorePayload(extra={}){const node=document.getElementById('restoreNode').value.trim();if(!/^\d{1,15}$/.test(node)){alert('Restore node must be a numeric Amazon browse-node ID.');return null;}return payload(Object.assign({browse_node:node},extra));}
+async function previewRestoreNode(){const p=restorePayload();if(!p)return;return call('/api/catalog/browse-node-restore-preview',p)}
+async function applyRestoreNode(){const p=restorePayload({confirm:'RESTORE NODE'});if(!p)return;const typed=prompt('This will restore browse node '+p.browse_node+' to the live listing. Type RESTORE NODE to continue:');if(typed!=='RESTORE NODE')return;return call('/api/catalog/browse-node-restore-apply',p)}
+window.addEventListener('load',()=>{const saved=localStorage.getItem(storageKey());if(saved)document.getElementById('restoreNode').value=saved;});
 </script></body></html>''')
 
 
