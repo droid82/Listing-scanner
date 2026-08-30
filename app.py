@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("listing-scanner")
 
-BUILD_ID = "2026-08-30-fast-regulatory-spapi-browse-test-v3"
+BUILD_ID = "2026-08-30-fast-regulatory-spapi-browse-test-v4"
 
 MARKETPLACES = {
     "UK": {"url": "https://www.amazon.co.uk/dp/{}", "country": "uk"},
@@ -1750,10 +1750,19 @@ def _prepare_browse_node_delete(req):
                 "Nothing was changed."
             ),
         )
+    # Amazon's Listings Items API expects a delete patch to identify the
+    # attribute value(s) being removed. Sending a delete operation with no
+    # value produces InvalidInput: "Invalid empty value provided in patch".
+    # Use the exact seller-submitted value returned by getListingsItem so the
+    # preview/live request targets only the current browse-node contribution.
     body = {
         "productType": product_type,
         "patches": [
-            {"op": "delete", "path": "/attributes/recommended_browse_nodes"}
+            {
+                "op": "delete",
+                "path": "/attributes/recommended_browse_nodes",
+                "value": current,
+            }
         ],
     }
     return asin, marketplace, marketplace_id, sku, product_type, listing, current, body
